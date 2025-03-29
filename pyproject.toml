@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Flatshop"
+version = "0.0.1"
+dependencies = [
+    "PyGObject",
+    "requests",
+]
+
+[project.scripts]
+flatshop = "flatshop.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "ruff==0.11.2"
+]
