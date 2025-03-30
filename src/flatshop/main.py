@@ -1,19 +1,23 @@
 #!/usr/bin/python3
 
-import gi
 import sys
+
+import gi
+
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GLib", "2.0")
 gi.require_version("Flatpak", "1.0")
-gi.require_version('GdkPixbuf', '2.0')
-from gi.repository import Gtk, Gio, Gdk, GLib, GdkPixbuf
+gi.require_version("GdkPixbuf", "2.0")
+import json
+import subprocess
+import threading
+from pathlib import Path
+
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk
+
 from . import libflatpak_query
 from .libflatpak_query import AppStreamComponentKind as AppKind
-import json
-import threading
-import subprocess
-from pathlib import Path
 
 
 class MainWindow(Gtk.Window):
@@ -41,134 +45,134 @@ class MainWindow(Gtk.Window):
 
         # Define category groups and their titles
         self.category_groups = {
-            'system': {
-                'installed': 'Installed',
-                'updates': 'Updates',
-                'repositories': 'Repositories'
+            "system": {
+                "installed": "Installed",
+                "updates": "Updates",
+                "repositories": "Repositories",
             },
-            'collections': {
-                'trending': 'Trending',
-                'popular': 'Popular',
-                'recently-added': 'New',
-                'recently-updated': 'Updated'
+            "collections": {
+                "trending": "Trending",
+                "popular": "Popular",
+                "recently-added": "New",
+                "recently-updated": "Updated",
             },
-            'categories': {
-                'office': 'Productivity',
-                'graphics': 'Graphics & Photography',
-                'audiovideo': 'Audio & Video',
-                'education': 'Education',
-                'network': 'Networking',
-                'game': 'Games',
-                'development': 'Developer Tools',
-                'science': 'Science',
-                'system': 'System',
-                'utility': 'Utilities'
-            }
+            "categories": {
+                "office": "Productivity",
+                "graphics": "Graphics & Photography",
+                "audiovideo": "Audio & Video",
+                "education": "Education",
+                "network": "Networking",
+                "game": "Games",
+                "development": "Developer Tools",
+                "science": "Science",
+                "system": "System",
+                "utility": "Utilities",
+            },
         }
 
         # Define subcategories
         self.subcategory_groups = {
-            'audiovideo': {
-                'audiovideoediting': 'Audio & Video Editing',
-                'discburning': 'Disc Burning',
-                'midi': 'Midi',
-                'mixer': 'Mixer',
-                'player': 'Player',
-                'recorder': 'Recorder',
-                'sequencer': 'Sequencer',
-                'tuner': 'Tuner',
-                'tv': 'TV'
+            "audiovideo": {
+                "audiovideoediting": "Audio & Video Editing",
+                "discburning": "Disc Burning",
+                "midi": "Midi",
+                "mixer": "Mixer",
+                "player": "Player",
+                "recorder": "Recorder",
+                "sequencer": "Sequencer",
+                "tuner": "Tuner",
+                "tv": "TV",
             },
-            'development': {
-                'building': 'Building',
-                'database': 'Database',
-                'debugger': 'Debugger',
-                'guidesigner': 'GUI Designer',
-                'ide': 'IDE',
-                'profiling': 'Profiling',
-                'revisioncontrol': 'Revision Control',
-                'translation': 'Translation',
-                'webdevelopment': 'Web Development'
+            "development": {
+                "building": "Building",
+                "database": "Database",
+                "debugger": "Debugger",
+                "guidesigner": "GUI Designer",
+                "ide": "IDE",
+                "profiling": "Profiling",
+                "revisioncontrol": "Revision Control",
+                "translation": "Translation",
+                "webdevelopment": "Web Development",
             },
-            'game': {
-                'actiongame': 'Action Games',
-                'adventuregame': 'Adventure Games',
-                'arcadegame': 'Arcade Games',
-                'blocksgame': 'Blocks Games',
-                'boardgame': 'Board Games',
-                'cardgame': 'Card Games',
-                'emulator': 'Emulators',
-                'kidsgame': 'Kids\' Games',
-                'logicgame': 'Logic Games',
-                'roleplaying': 'Role Playing',
-                'shooter': 'Shooter',
-                'simulation': 'Simulation',
-                'sportsgame': 'Sports Games',
-                'strategygame': 'Strategy Games'
+            "game": {
+                "actiongame": "Action Games",
+                "adventuregame": "Adventure Games",
+                "arcadegame": "Arcade Games",
+                "blocksgame": "Blocks Games",
+                "boardgame": "Board Games",
+                "cardgame": "Card Games",
+                "emulator": "Emulators",
+                "kidsgame": "Kids' Games",
+                "logicgame": "Logic Games",
+                "roleplaying": "Role Playing",
+                "shooter": "Shooter",
+                "simulation": "Simulation",
+                "sportsgame": "Sports Games",
+                "strategygame": "Strategy Games",
             },
-            'graphics': {
-                '2dgraphics': '2D Graphics',
-                '3dgraphics': '3D Graphics',
-                'ocr': 'OCR',
-                'photography': 'Photography',
-                'publishing': 'Publishing',
-                'rastergraphics': 'Raster Graphics',
-                'scanning': 'Scanning',
-                'vectorgraphics': 'Vector Graphics',
-                'viewer': 'Viewer'
+            "graphics": {
+                "2dgraphics": "2D Graphics",
+                "3dgraphics": "3D Graphics",
+                "ocr": "OCR",
+                "photography": "Photography",
+                "publishing": "Publishing",
+                "rastergraphics": "Raster Graphics",
+                "scanning": "Scanning",
+                "vectorgraphics": "Vector Graphics",
+                "viewer": "Viewer",
             },
-            'network': {
-                'chat': 'Chat',
-                'email': 'Email',
-                'feed': 'Feed',
-                'filetransfer': 'File Transfer',
-                'hamradio': 'Ham Radio',
-                'instantmessaging': 'Instant Messaging',
-                'ircclient': 'IRC Client',
-                'monitor': 'Monitor',
-                'news': 'News',
-                'p2p': 'P2P',
-                'remoteaccess': 'Remote Access',
-                'telephony': 'Telephony',
-                'videoconference': 'Video Conference',
-                'webbrowser': 'Web Browser',
-                'webdevelopment': 'Web Development'
+            "network": {
+                "chat": "Chat",
+                "email": "Email",
+                "feed": "Feed",
+                "filetransfer": "File Transfer",
+                "hamradio": "Ham Radio",
+                "instantmessaging": "Instant Messaging",
+                "ircclient": "IRC Client",
+                "monitor": "Monitor",
+                "news": "News",
+                "p2p": "P2P",
+                "remoteaccess": "Remote Access",
+                "telephony": "Telephony",
+                "videoconference": "Video Conference",
+                "webbrowser": "Web Browser",
+                "webdevelopment": "Web Development",
             },
-            'office': {
-                'calendar': 'Calendar',
-                'chart': 'Chart',
-                'contactmanagement': 'Contact Management',
-                'database': 'Database',
-                'dictionary': 'Dictionary',
-                'email': 'Email',
-                'finance': 'Finance',
-                'presentation': 'Presentation',
-                'projectmanagement': 'Project Management',
-                'publishing': 'Publishing',
-                'spreadsheet': 'Spreadsheet',
-                'viewer': 'Viewer',
-                'wordprocessor': 'Word Processor'
+            "office": {
+                "calendar": "Calendar",
+                "chart": "Chart",
+                "contactmanagement": "Contact Management",
+                "database": "Database",
+                "dictionary": "Dictionary",
+                "email": "Email",
+                "finance": "Finance",
+                "presentation": "Presentation",
+                "projectmanagement": "Project Management",
+                "publishing": "Publishing",
+                "spreadsheet": "Spreadsheet",
+                "viewer": "Viewer",
+                "wordprocessor": "Word Processor",
             },
-            'system': {
-                'emulator': 'Emulators',
-                'filemanager': 'File Manager',
-                'filesystem': 'Filesystem',
-                'filetools': 'File Tools',
-                'monitor': 'Monitor',
-                'security': 'Security',
-                'terminalemulator': 'Terminal Emulator'
+            "system": {
+                "emulator": "Emulators",
+                "filemanager": "File Manager",
+                "filesystem": "Filesystem",
+                "filetools": "File Tools",
+                "monitor": "Monitor",
+                "security": "Security",
+                "terminalemulator": "Terminal Emulator",
             },
-            'utility': {
-                'accessibility': 'Accessibility',
-                'archiving': 'Archiving',
-                'calculator': 'Calculator',
-                'clock': 'Clock',
-                'compression': 'Compression',
-                'filetools': 'File Tools',
-                'telephonytools': 'Telephony Tools',
-                'texteditor': 'Text Editor',
-                'texttools': 'Text Tools'
-            }
+            "utility": {
+                "accessibility": "Accessibility",
+                "archiving": "Archiving",
+                "calculator": "Calculator",
+                "clock": "Clock",
+                "compression": "Compression",
+                "filetools": "File Tools",
+                "telephonytools": "Telephony Tools",
+                "texteditor": "Text Editor",
+                "texttools": "Text Tools",
+            },
         }
 
         # Add CSS provider for custom styling
@@ -296,11 +300,7 @@ class MainWindow(Gtk.Window):
         """)
 
         # Add CSS provider to the default screen
-        Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(),
-            css_provider,
-            600
-        )
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css_provider, 600)
 
         # Create main layout
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -325,9 +325,9 @@ class MainWindow(Gtk.Window):
             return
         uri = data.get_uris()[0]
         file_path = Gio.File.new_for_uri(uri).get_path()
-        if file_path and file_path.endswith('.flatpakref'):
+        if file_path and file_path.endswith(".flatpakref"):
             self.handle_flatpakref_file(file_path)
-        if file_path and file_path.endswith('.flatpakrepo'):
+        if file_path and file_path.endswith(".flatpakrepo"):
             self.handle_flatpakrepo_file(file_path)
         context.finish(True, False, time)
 
@@ -346,8 +346,8 @@ class MainWindow(Gtk.Window):
         self.top_bar.set_vexpand(False)
         self.top_bar.set_spacing(6)
         self.top_bar.set_border_width(0)  # Remove border width
-        self.top_bar.set_margin_top(0)    # Remove top margin
-        self.top_bar.set_margin_bottom(0) # Remove bottom margin
+        self.top_bar.set_margin_top(0)  # Remove top margin
+        self.top_bar.set_margin_bottom(0)  # Remove bottom margin
 
         # Add search bar
         self.searchbar = Gtk.SearchBar()  # Use self.searchbar instead of searchbar
@@ -355,15 +355,16 @@ class MainWindow(Gtk.Window):
         self.searchbar.set_vexpand(False)
         self.searchbar.set_margin_bottom(6)
         self.searchbar.set_margin_bottom(0)  # Remove bottom margin
-        self.searchbar.set_margin_top(0)     # Remove top margin
+        self.searchbar.set_margin_top(0)  # Remove top margin
 
         # Create search entry with icon
         searchentry = Gtk.SearchEntry()
         searchentry.set_placeholder_text("Search applications...")
-        searchentry.set_icon_from_gicon(Gtk.EntryIconPosition.PRIMARY,
-                                    Gio.Icon.new_for_string('search'))
-        searchentry.set_margin_top(0)    # Remove top margin
-        searchentry.set_margin_bottom(0) # Remove bottom margin
+        searchentry.set_icon_from_gicon(
+            Gtk.EntryIconPosition.PRIMARY, Gio.Icon.new_for_string("search")
+        )
+        searchentry.set_margin_top(0)  # Remove top margin
+        searchentry.set_margin_bottom(0)  # Remove bottom margin
         searchentry.set_size_request(-1, 10)  # Set specific height
 
         # Connect search entry signals
@@ -403,8 +404,10 @@ class MainWindow(Gtk.Window):
         # Add repository button
         refresh_metadata_button = Gtk.Button()
         refresh_metadata_button.set_tooltip_text("Refresh metadata")
-        refresh_metadata_button_icon = Gio.Icon.new_for_string('system-reboot-symbolic')
-        refresh_metadata_button.set_image(Gtk.Image.new_from_gicon(refresh_metadata_button_icon, Gtk.IconSize.BUTTON))
+        refresh_metadata_button_icon = Gio.Icon.new_for_string("system-reboot-symbolic")
+        refresh_metadata_button.set_image(
+            Gtk.Image.new_from_gicon(refresh_metadata_button_icon, Gtk.IconSize.BUTTON)
+        )
         refresh_metadata_button.get_style_context().add_class("dark-install-button")
         refresh_metadata_button.connect("clicked", self.on_refresh_metadata_button_clicked)
 
@@ -456,7 +459,7 @@ class MainWindow(Gtk.Window):
         if desired_state:
             # Request superuser validation
             try:
-                #subprocess.run(['pkexec', 'true'], check=True)
+                # subprocess.run(['pkexec', 'true'], check=True)
                 self.system_mode = True
                 self.refresh_data()
                 self.refresh_current_page()
@@ -467,7 +470,7 @@ class MainWindow(Gtk.Window):
                     message_type=Gtk.MessageType.ERROR,
                     buttons=Gtk.ButtonsType.OK,
                     text="Authentication failed",
-                    secondary_text="Could not enable system mode"
+                    secondary_text="Could not enable system mode",
                 )
                 dialog.connect("response", lambda d, r: d.destroy())
                 dialog.show()
@@ -508,7 +511,7 @@ class MainWindow(Gtk.Window):
             title="Fetching metadata, please wait...",
             parent=self,
             modal=True,
-            destroy_with_parent=True
+            destroy_with_parent=True,
         )
         dialog.set_size_request(400, 100)
 
@@ -526,7 +529,14 @@ class MainWindow(Gtk.Window):
         # Define thread target function
         def retrieve_metadata():
             try:
-                category_results, collection_results, subcategory_results, installed_results, updates_results, all_apps = searcher.retrieve_metadata(self.system_mode)
+                (
+                    category_results,
+                    collection_results,
+                    subcategory_results,
+                    installed_results,
+                    updates_results,
+                    all_apps,
+                ) = searcher.retrieve_metadata(self.system_mode)
                 self.category_results = category_results
                 self.category_results = subcategory_results
                 self.collection_results = collection_results
@@ -540,13 +550,15 @@ class MainWindow(Gtk.Window):
                     destroy_with_parent=True,
                     message_type=Gtk.MessageType.ERROR,
                     buttons=Gtk.ButtonsType.OK,
-                    text=f"Error retrieving metadata: {str(e)}"
+                    text=f"Error retrieving metadata: {str(e)}",
                 )
                 dialog.run()
                 dialog.destroy()
+
         # Start the refresh thread
         refresh_thread = threading.Thread(target=retrieve_metadata)
         refresh_thread.start()
+
         def update_progress():
             while refresh_thread.is_alive():
                 progress_bar.set_text("Fetching...")
@@ -577,18 +589,17 @@ class MainWindow(Gtk.Window):
                 destroy_with_parent=True,
                 message_type=message_type,
                 buttons=Gtk.ButtonsType.OK,
-                text=f"Error refreshing local data: {str(e)}"
+                text=f"Error refreshing local data: {str(e)}",
             )
             dialog.run()
             dialog.destroy()
 
-
     def create_panels(self):
         # Check if panels already exist
-        if hasattr(self, 'left_panel') and self.left_panel.get_parent():
+        if hasattr(self, "left_panel") and self.left_panel.get_parent():
             self.main_box.remove(self.left_panel)
 
-        if hasattr(self, 'right_panel') and self.right_panel.get_parent():
+        if hasattr(self, "right_panel") and self.right_panel.get_parent():
             self.main_box.remove(self.right_panel)
 
         # Create left panel with grouped categories
@@ -603,13 +614,12 @@ class MainWindow(Gtk.Window):
 
         # Pack the panels with proper expansion
         self.panels_box.pack_start(self.left_panel, False, False, 0)  # Left panel doesn't expand
-        self.panels_box.pack_end(self.right_panel, True, True, 0)    # Right panel expands both ways
+        self.panels_box.pack_end(self.right_panel, True, True, 0)  # Right panel expands both ways
 
         # Add panels container to main box
         self.main_box.pack_start(self.panels_box, True, True, 0)
 
     def create_grouped_category_panel(self, title, groups):
-
         # Create container for categories
         panel_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         panel_container.set_spacing(6)
@@ -623,7 +633,7 @@ class MainWindow(Gtk.Window):
         # Create scrollable area
         scrolled_window = Gtk.ScrolledWindow()
         scrolled_window.set_hexpand(True)
-        scrolled_window.set_vexpand(True)   # Expand vertically
+        scrolled_window.set_vexpand(True)  # Expand vertically
         scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
         # Create container for categories
@@ -633,7 +643,7 @@ class MainWindow(Gtk.Window):
         container.set_halign(Gtk.Align.FILL)  # Fill horizontally
         container.set_valign(Gtk.Align.START)  # Align to top
         container.set_hexpand(True)
-        container.set_vexpand(False)   # Expand vertically
+        container.set_vexpand(False)  # Expand vertically
 
         # Dictionary to store category widgets
         self.category_widgets = {}
@@ -678,9 +688,12 @@ class MainWindow(Gtk.Window):
                 category_box.add(category_label)
 
                 # Connect click event
-                category_box.connect("button-release-event",
-                                lambda widget, event, cat=category, grp=group_name:
-                                self.on_category_clicked(cat, grp))
+                category_box.connect(
+                    "button-release-event",
+                    lambda widget, event, cat=category, grp=group_name: self.on_category_clicked(
+                        cat, grp
+                    ),
+                )
 
                 # Store widget in group
                 self.category_widgets[group_name].append(category_box)
@@ -698,7 +711,6 @@ class MainWindow(Gtk.Window):
         """Handle search text changes"""
         pass  # Don't perform search on every keystroke
 
-
     def on_search_activate(self, searchentry):
         """Handle Enter key press in search"""
         self.update_category_header("Search Results")
@@ -712,12 +724,14 @@ class MainWindow(Gtk.Window):
         searchable_items = []
         for app in self.all_apps:
             details = app.get_details()
-            searchable_items.append({
-                'text': f"{details['name']} {details['description']} {details['categories']}".lower(),
-                'app': app,
-                'id': details['id'].lower(),
-                'name': details['name'].lower()
-            })
+            searchable_items.append(
+                {
+                    "text": f"{details['name']} {details['description']} {details['categories']}".lower(),
+                    "app": app,
+                    "id": details["id"].lower(),
+                    "name": details["name"].lower(),
+                }
+            )
 
         # Filter and rank results
         filtered_apps = self.rank_search_results(search_term, searchable_items)
@@ -740,28 +754,31 @@ class MainWindow(Gtk.Window):
         # Process each item
         for item in searchable_items:
             # Check if component type matches filter
-            if component_type_filter and item['app'].get_details()['kind'] != component_type_filter:
+            if (
+                component_type_filter
+                and item["app"].get_details()["kind"] != component_type_filter
+            ):
                 continue
 
             # Check exact ID match
-            if item['id'] == search_term:
-                exact_id_matches.append(item['app'])
+            if item["id"] == search_term:
+                exact_id_matches.append(item["app"])
                 continue
 
             # Check exact name match
-            if item['name'] == search_term:
-                exact_name_matches.append(item['app'])
+            if item["name"] == search_term:
+                exact_name_matches.append(item["app"])
                 continue
 
             # Check for partial matches longer than 5 characters
             if len(search_term) > 5:
-                if search_term in item['id'] or search_term in item['name']:
-                    partial_matches.append(item['app'])
+                if search_term in item["id"] or search_term in item["name"]:
+                    partial_matches.append(item["app"])
                     continue
 
             # Check for other matches
-            if search_term in item['text']:
-                other_matches.append(item['app'])
+            if search_term in item["text"]:
+                other_matches.append(item["app"])
 
         # Combine results in order of priority
         return exact_id_matches + exact_name_matches + partial_matches + other_matches
@@ -796,13 +813,13 @@ class MainWindow(Gtk.Window):
     def update_category_header(self, category):
         """Update the category header text based on the selected category."""
         display_title = ""
-        if category in self.category_groups['system']:
-            display_title = self.category_groups['system'][category]
-        if category in self.category_groups['collections']:
-            display_title = self.category_groups['collections'][category]
-        elif category in self.category_groups['categories']:
-            display_title = self.category_groups['categories'][category]
-        else:            # Find the parent category and get the title
+        if category in self.category_groups["system"]:
+            display_title = self.category_groups["system"][category]
+        if category in self.category_groups["collections"]:
+            display_title = self.category_groups["collections"][category]
+        elif category in self.category_groups["categories"]:
+            display_title = self.category_groups["categories"][category]
+        else:  # Find the parent category and get the title
             for parent_category, subcategories in self.subcategory_groups.items():
                 if category in subcategories:
                     display_title = subcategories[category]
@@ -830,7 +847,7 @@ class MainWindow(Gtk.Window):
         self.subcategories_bar.set_hexpand(True)
         self.subcategories_bar.set_spacing(6)
         self.subcategories_bar.set_border_width(6)
-        #self.subcategories_bar.get_style_context().add_class("dark-header")
+        # self.subcategories_bar.get_style_context().add_class("dark-header")
         self.subcategories_bar.set_visible(False)
         self.subcategories_bar.set_halign(Gtk.Align.FILL)  # Ensure full width
         self.right_panel.pack_start(self.subcategories_bar, False, False, 0)
@@ -859,7 +876,7 @@ class MainWindow(Gtk.Window):
 
         # Create pan start button
         pan_start = Gtk.Button()
-        pan_start_icon = Gio.Icon.new_for_string('pan-start-symbolic')
+        pan_start_icon = Gio.Icon.new_for_string("pan-start-symbolic")
         pan_start.set_image(Gtk.Image.new_from_gicon(pan_start_icon, Gtk.IconSize.BUTTON))
         pan_start.get_style_context().add_class("dark-category-button")
         pan_start.connect("clicked", self.on_pan_start)
@@ -904,9 +921,10 @@ class MainWindow(Gtk.Window):
                 subcategory_box.add(subcategory_label)
 
                 # Connect click event
-                subcategory_box.connect("button-release-event",
-                                    lambda widget, event, subcat=subcategory:
-                                    self.on_subcategory_clicked(subcat))
+                subcategory_box.connect(
+                    "button-release-event",
+                    lambda widget, event, subcat=subcategory: self.on_subcategory_clicked(subcat),
+                )
 
                 # Store widget in group
                 container.pack_start(subcategory_box, False, False, 0)
@@ -916,7 +934,7 @@ class MainWindow(Gtk.Window):
 
             # Create pan end button
             pan_end = Gtk.Button()
-            pan_end_icon = Gio.Icon.new_for_string('pan-end-symbolic')
+            pan_end_icon = Gio.Icon.new_for_string("pan-end-symbolic")
             pan_end.set_image(Gtk.Image.new_from_gicon(pan_end_icon, Gtk.IconSize.BUTTON))
             pan_end.get_style_context().add_class("dark-category-button")
             pan_end.connect("clicked", self.on_pan_end)
@@ -927,7 +945,7 @@ class MainWindow(Gtk.Window):
             self.subcategories_bar.pack_start(pan_start, False, False, 0)
             self.subcategories_bar.pack_start(self.scrolled_window, True, True, 0)
             self.subcategories_bar.pack_start(pan_end, False, False, 0)
-            #self.subcategories_bar.pack_start(container, True, True, 0)
+            # self.subcategories_bar.pack_start(container, True, True, 0)
             self.subcategories_bar.queue_resize()
             self.subcategories_bar.show_all()
         else:
@@ -956,7 +974,7 @@ class MainWindow(Gtk.Window):
                 parent_box.set_margin_bottom(2)
 
                 # Create parent label
-                parent_label = Gtk.Label(label=self.category_groups['categories'][parent_category])
+                parent_label = Gtk.Label(label=self.category_groups["categories"][parent_category])
                 parent_label.set_halign(Gtk.Align.START)
                 parent_label.set_hexpand(False)
                 parent_label.get_style_context().add_class("dark-category-button")
@@ -965,9 +983,13 @@ class MainWindow(Gtk.Window):
                 parent_box.add(parent_label)
 
                 # Connect click event
-                parent_box.connect("button-release-event",
-                                lambda widget, event, cat=parent_category, grp='categories':
-                                self.on_category_clicked(cat, grp))
+                parent_box.connect(
+                    "button-release-event",
+                    lambda widget,
+                    event,
+                    cat=parent_category,
+                    grp="categories": self.on_category_clicked(cat, grp),
+                )
 
                 # Add parent box to container
                 container.pack_start(parent_box, False, False, 0)
@@ -980,7 +1002,9 @@ class MainWindow(Gtk.Window):
                 subcategory_box.set_margin_bottom(2)
 
                 # Create subcategory label
-                subcategory_label = Gtk.Label(label=self.subcategory_groups[parent_category][category])
+                subcategory_label = Gtk.Label(
+                    label=self.subcategory_groups[parent_category][category]
+                )
                 subcategory_label.set_halign(Gtk.Align.START)
                 subcategory_label.set_hexpand(False)
                 subcategory_label.get_style_context().add_class("dark-category-button")
@@ -989,9 +1013,10 @@ class MainWindow(Gtk.Window):
                 subcategory_box.add(subcategory_label)
 
                 # Connect click event
-                subcategory_box.connect("button-release-event",
-                                    lambda widget, event, subcat=category:
-                                    self.on_subcategory_clicked(subcat))
+                subcategory_box.connect(
+                    "button-release-event",
+                    lambda widget, event, subcat=category: self.on_subcategory_clicked(subcat),
+                )
 
                 # Add subcategory box to container
                 container.pack_start(subcategory_box, False, False, 0)
@@ -1002,7 +1027,7 @@ class MainWindow(Gtk.Window):
                 # Show the bar and force a layout update
                 self.subcategories_bar.set_visible(True)
                 self.subcategories_bar.pack_start(self.scrolled_window, True, True, 0)
-                #self.subcategories_bar.pack_start(container, True, True, 0)
+                # self.subcategories_bar.pack_start(container, True, True, 0)
                 self.subcategories_bar.queue_resize()
                 self.subcategories_bar.show_all()
             else:
@@ -1026,7 +1051,7 @@ class MainWindow(Gtk.Window):
         """Handle subcategory button clicks."""
         # Update the current page to the subcategory
         self.current_page = subcategory
-        self.current_group = 'subcategories'
+        self.current_group = "subcategories"
         self.update_category_header(subcategory)
         self.update_subcategories_bar(subcategory)
         self.show_category_apps(subcategory)
@@ -1051,11 +1076,7 @@ class MainWindow(Gtk.Window):
 
     def get_app_priority(self, kind):
         """Convert AppKind to numeric priority for sorting"""
-        priorities = {
-            "DESKTOP_APP": 0,
-            "ADDON": 1,
-            "RUNTIME": 2
-        }
+        priorities = {"DESKTOP_APP": 0, "ADDON": 1, "RUNTIME": 2}
         return priorities.get(kind, 3)
 
     def show_category_apps(self, category):
@@ -1063,53 +1084,59 @@ class MainWindow(Gtk.Window):
         apps = []
 
         # Load system data
-        if 'installed' in category:
+        if "installed" in category:
             apps.extend([app for app in self.installed_results])
-        if 'updates' in category:
+        if "updates" in category:
             apps.extend([app for app in self.updates_results])
 
-        if ('installed' in category) or ('updates' in category):
+        if ("installed" in category) or ("updates" in category):
             # Sort apps by component type priority
             if apps:
-                apps.sort(key=lambda app: self.get_app_priority(app.get_details()['kind']))
+                apps.sort(key=lambda app: self.get_app_priority(app.get_details()["kind"]))
 
         # Load collections data
         try:
-            with open("collections_data.json", 'r', encoding='utf-8') as f:
+            with open("collections_data.json", "r", encoding="utf-8") as f:
                 collections_data = json.load(f)
 
                 # Find the specific category in collections data
-                category_entry = next((
-                    entry for entry in collections_data
-                    if entry['category'] == category
-                ), None)
+                category_entry = next(
+                    (entry for entry in collections_data if entry["category"] == category), None
+                )
 
                 if category_entry:
                     # Get all app IDs in this category
-                    app_ids_in_category = [
-                        hit['app_id'] for hit in category_entry['data']['hits']
-                    ]
+                    app_ids_in_category = [hit["app_id"] for hit in category_entry["data"]["hits"]]
 
                     # Filter apps based on presence in category
-                    apps.extend([
-                        app for app in self.collection_results
-                        if app.get_details()['id'] in app_ids_in_category
-                    ])
+                    apps.extend(
+                        [
+                            app
+                            for app in self.collection_results
+                            if app.get_details()["id"] in app_ids_in_category
+                        ]
+                    )
                 else:
                     # Fallback to previous behavior if category isn't in collections
-                    apps.extend([
-                        app for app in self.collection_results
-                        if category in app.get_details()['categories']
-                    ])
+                    apps.extend(
+                        [
+                            app
+                            for app in self.collection_results
+                            if category in app.get_details()["categories"]
+                        ]
+                    )
 
         except (IOError, json.JSONDecodeError) as e:
             print(f"Error reading collections data: {str(e)}")
-            apps.extend([
-                app for app in self.collection_results
-                if category in app.get_details()['categories']
-            ])
+            apps.extend(
+                [
+                    app
+                    for app in self.collection_results
+                    if category in app.get_details()["categories"]
+                ]
+            )
 
-        if 'repositories' in category:
+        if "repositories" in category:
             # Clear existing content
             for child in self.right_container.get_children():
                 child.destroy()
@@ -1141,7 +1168,7 @@ class MainWindow(Gtk.Window):
             # Create right label
             right_label = Gtk.Label(label="+/-")
             right_label.get_style_context().add_class("repo-list-header")
-            right_label.set_halign(Gtk.Align.END)   # Align right
+            right_label.set_halign(Gtk.Align.END)  # Align right
             header_bar.pack_end(right_label, False, False, 0)
 
             # Add header bar to container
@@ -1162,7 +1189,7 @@ class MainWindow(Gtk.Window):
 
             # Add repository button
             add_repo_button = Gtk.Button()
-            add_icon = Gio.Icon.new_for_string('list-add')
+            add_icon = Gio.Icon.new_for_string("list-add")
             add_repo_button.set_image(Gtk.Image.new_from_gicon(add_icon, Gtk.IconSize.BUTTON))
             add_repo_button.get_style_context().add_class("dark-install-button")
             add_repo_button.connect("clicked", self.on_add_repo_button_clicked)
@@ -1173,15 +1200,19 @@ class MainWindow(Gtk.Window):
 
             add_flathub_beta_repo_button = Gtk.Button(label="Add Flathub Beta Repo")
             add_flathub_beta_repo_button.get_style_context().add_class("dark-install-button")
-            add_flathub_beta_repo_button.connect("clicked", self.on_add_flathub_beta_repo_button_clicked)
+            add_flathub_beta_repo_button.connect(
+                "clicked", self.on_add_flathub_beta_repo_button_clicked
+            )
 
             # Check for existing Flathub repositories and disable buttons accordingly
             flathub_url = "https://dl.flathub.org/repo/"
             flathub_beta_url = "https://dl.flathub.org/beta-repo/"
 
-            existing_urls = [repo.get_url().rstrip('/') for repo in repos]
-            add_flathub_repo_button.set_sensitive(flathub_url.rstrip('/') not in existing_urls)
-            add_flathub_beta_repo_button.set_sensitive(flathub_beta_url.rstrip('/') not in existing_urls)
+            existing_urls = [repo.get_url().rstrip("/") for repo in repos]
+            add_flathub_repo_button.set_sensitive(flathub_url.rstrip("/") not in existing_urls)
+            add_flathub_beta_repo_button.set_sensitive(
+                flathub_beta_url.rstrip("/") not in existing_urls
+            )
 
             # Add repositories to container
             for repo in repos:
@@ -1207,7 +1238,7 @@ class MainWindow(Gtk.Window):
 
                 # Create delete button
                 delete_button = Gtk.Button()
-                delete_icon = Gio.Icon.new_for_string('list-remove')
+                delete_icon = Gio.Icon.new_for_string("list-remove")
                 delete_button.set_image(Gtk.Image.new_from_gicon(delete_icon, Gtk.IconSize.BUTTON))
                 delete_button.get_style_context().add_class("destructive-action")
                 delete_button.connect("clicked", self.on_repo_delete, repo)
@@ -1234,7 +1265,7 @@ class MainWindow(Gtk.Window):
         # Apply component type filter if set
         component_type_filter = self.current_component_type
         if component_type_filter:
-            apps = [app for app in apps if app.get_details()['kind'] == component_type_filter]
+            apps = [app for app in apps if app.get_details()["kind"] == component_type_filter]
 
         self.display_apps(apps)
 
@@ -1249,8 +1280,9 @@ class MainWindow(Gtk.Window):
 
         # Scale to 64x64 using high-quality interpolation
         scaled_pb = pb.scale_simple(
-            64, 64,  # New dimensions
-            GdkPixbuf.InterpType.BILINEAR  # High-quality scaling
+            64,
+            64,  # New dimensions
+            GdkPixbuf.InterpType.BILINEAR,  # High-quality scaling
         )
 
         # Create the image widget from the scaled pixbuf
@@ -1263,31 +1295,28 @@ class MainWindow(Gtk.Window):
         apps_by_id = {}
         for app in apps:
             details = app.get_details()
-            app_id = details['id']
+            app_id = details["id"]
 
             # If app_id isn't in dictionary, add it
             if app_id not in apps_by_id:
-                apps_by_id[app_id] = {
-                    'app': app,
-                    'repos': set()
-                }
+                apps_by_id[app_id] = {"app": app, "repos": set()}
 
             # Add repository to the set
-            repo_name = details.get('repo', 'unknown')
-            apps_by_id[app_id]['repos'].add(repo_name)
+            repo_name = details.get("repo", "unknown")
+            apps_by_id[app_id]["repos"].add(repo_name)
 
         # Display each unique application
         for app_id, app_data in apps_by_id.items():
-            app = app_data['app']
+            app = app_data["app"]
             details = app.get_details()
             is_installed = False
             for package in self.installed_results:
-                if details['id'] == package.id:
+                if details["id"] == package.id:
                     is_installed = True
                     break
             is_updatable = False
             for package in self.updates_results:
-                if details['id'] == package.id:
+                if details["id"] == package.id:
                     is_updatable = True
                     break
 
@@ -1302,12 +1331,14 @@ class MainWindow(Gtk.Window):
             icon_box.set_size_request(88, -1)
 
             # Create and add the icon
-            app_icon = Gio.Icon.new_for_string('package-x-generic-symbolic')
+            app_icon = Gio.Icon.new_for_string("package-x-generic-symbolic")
             icon_widget = self.create_scaled_icon(app_icon, is_themed=True)
 
-            if  details['icon_filename']:
-                if Path(details['icon_path_128'] + "/" + details['icon_filename']).exists():
-                    icon_widget = self.create_scaled_icon(f"{details['icon_path_128']}/{details['icon_filename']}", is_themed=False)
+            if details["icon_filename"]:
+                if Path(details["icon_path_128"] + "/" + details["icon_filename"]).exists():
+                    icon_widget = self.create_scaled_icon(
+                        f"{details['icon_path_128']}/{details['icon_filename']}", is_themed=False
+                    )
 
             icon_widget.set_size_request(64, 64)
             icon_box.pack_start(icon_widget, True, True, 0)
@@ -1318,7 +1349,7 @@ class MainWindow(Gtk.Window):
             right_box.set_hexpand(True)
 
             # Add title
-            title_label = Gtk.Label(label=details['name'])
+            title_label = Gtk.Label(label=details["name"])
             title_label.get_style_context().add_class("app-list-header")
             title_label.set_halign(Gtk.Align.START)
             title_label.set_yalign(0.5)  # Use yalign instead of valign
@@ -1330,7 +1361,7 @@ class MainWindow(Gtk.Window):
             kind_box.set_halign(Gtk.Align.START)
             kind_box.set_valign(Gtk.Align.START)
 
-            kind_label = Gtk.Label(label=details['kind'])
+            kind_label = Gtk.Label(label=details["kind"])
             kind_label.get_style_context().add_class("item-repo-label")
             kind_label.set_halign(Gtk.Align.START)
             kind_box.pack_end(kind_label, False, False, 0)
@@ -1342,14 +1373,14 @@ class MainWindow(Gtk.Window):
             repo_box.set_valign(Gtk.Align.END)
 
             # Add repository labels
-            for repo in sorted(app_data['repos']):
+            for repo in sorted(app_data["repos"]):
                 repo_label = Gtk.Label(label=repo)
                 repo_label.get_style_context().add_class("item-repo-label")
                 repo_label.set_halign(Gtk.Align.END)
                 repo_box.pack_end(repo_label, False, False, 0)
 
             # Add summary
-            desc_label = Gtk.Label(label=details['summary'])
+            desc_label = Gtk.Label(label=details["summary"])
             desc_label.set_halign(Gtk.Align.START)
             desc_label.set_yalign(0.5)
             desc_label.set_hexpand(True)
@@ -1367,19 +1398,13 @@ class MainWindow(Gtk.Window):
             # Install/Remove button
             if is_installed:
                 button = self.create_button(
-                    self.on_remove_clicked,
-                    app,
-                    None,
-                    condition=lambda x: True
+                    self.on_remove_clicked, app, None, condition=lambda x: True
                 )
                 add_rm_icon = "list-remove"
                 add_rm_style = "dark-remove-buton"
             else:
                 button = self.create_button(
-                    self.on_install_clicked,
-                    app,
-                    None,
-                    condition=lambda x: True
+                    self.on_install_clicked, app, None, condition=lambda x: True
                 )
                 add_rm_icon = "list-add"
                 add_rm_style = "dark-install-buton"
@@ -1393,25 +1418,20 @@ class MainWindow(Gtk.Window):
             # Add Update button if available
             if is_updatable:
                 update_button = self.create_button(
-                    self.on_update_clicked,
-                    app,
-                    None,
-                    condition=lambda x: True
+                    self.on_update_clicked, app, None, condition=lambda x: True
                 )
                 if update_button:
-                    update_icon = Gio.Icon.new_for_string('system-software-update-symbolic')
-                    update_button.set_image(Gtk.Image.new_from_gicon(update_icon, Gtk.IconSize.BUTTON))
+                    update_icon = Gio.Icon.new_for_string("system-software-update-symbolic")
+                    update_button.set_image(
+                        Gtk.Image.new_from_gicon(update_icon, Gtk.IconSize.BUTTON)
+                    )
                     update_button.get_style_context().add_class("dark-install-button")
                     buttons_box.pack_end(update_button, False, False, 0)
 
             # Details button
-            details_btn = self.create_button(
-                self.on_details_clicked,
-                app,
-                None
-            )
+            details_btn = self.create_button(self.on_details_clicked, app, None)
             if details_btn:
-                details_icon = Gio.Icon.new_for_string('question')
+                details_icon = Gio.Icon.new_for_string("question")
                 details_btn.set_image(Gtk.Image.new_from_gicon(details_icon, Gtk.IconSize.BUTTON))
                 details_btn.get_style_context().add_class("dark-install-button")
                 buttons_box.pack_end(details_btn, False, False, 0)
@@ -1421,10 +1441,10 @@ class MainWindow(Gtk.Window):
                 self.on_donate_clicked,
                 app,
                 None,
-                condition=lambda x: x.get_details().get('urls', {}).get('donation', '')
+                condition=lambda x: x.get_details().get("urls", {}).get("donation", ""),
             )
             if donate_btn:
-                donate_icon = Gio.Icon.new_for_string('donate')
+                donate_icon = Gio.Icon.new_for_string("donate")
                 donate_btn.set_image(Gtk.Image.new_from_gicon(donate_icon, Gtk.IconSize.BUTTON))
                 donate_btn.get_style_context().add_class("dark-install-button")
                 buttons_box.pack_end(donate_btn, False, False, 0)
@@ -1440,7 +1460,9 @@ class MainWindow(Gtk.Window):
             app_container.pack_start(icon_box, False, False, 0)
             app_container.pack_start(right_box, True, True, 0)
             self.right_container.pack_start(app_container, False, False, 0)
-            self.right_container.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+            self.right_container.pack_start(
+                Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0
+            )
 
         self.right_container.show_all()  # Show all widgets after adding them
 
@@ -1471,27 +1493,27 @@ class MainWindow(Gtk.Window):
 
     def on_install_clicked(self, button=None, app=None):
         """Handle the Install button click with installation options"""
-        id=""
+        id = ""
         if button and app:
             details = app.get_details()
-            title=f"Install {details['name']}?"
-            label=f"Install: {details['id']}?"
-            id=details['id']
+            title = f"Install {details['name']}?"
+            label = f"Install: {details['id']}?"
+            id = details["id"]
         # this is a stupid workaround for our button creator
         # so that we can use the same function in drag and drop
         # which of course does not have a button object
         elif app and not button:
-            title=f"Install {app}?"
-            label=f"Install: {app}?"
+            title = f"Install {app}?"
+            label = f"Install: {app}?"
         else:
-            message_type=Gtk.MessageType.ERROR
+            message_type = Gtk.MessageType.ERROR
             finished_dialog = Gtk.MessageDialog(
                 transient_for=self,
                 modal=True,
                 destroy_with_parent=True,
                 message_type=message_type,
                 buttons=Gtk.ButtonsType.OK,
-                text="Error: No app specified"
+                text="Error: No app specified",
             )
             finished_dialog.run()
             finished_dialog.destroy()
@@ -1568,16 +1590,20 @@ class MainWindow(Gtk.Window):
             selected_repo = None
             if button and app:
                 selected_repo = repo_combo.get_active_text()
+
             # Perform installation
             def perform_installation():
                 # Show waiting dialog
                 GLib.idle_add(self.show_waiting_dialog)
                 if button and app:
-                    success, message = libflatpak_query.install_flatpak(app, selected_repo, self.system_mode)
+                    success, message = libflatpak_query.install_flatpak(
+                        app, selected_repo, self.system_mode
+                    )
                 else:
                     success, message = libflatpak_query.install_flatpakref(app, self.system_mode)
                 GLib.idle_add(lambda: self.on_task_complete(dialog, success, message))
                 # Start spinner and begin installation
+
             thread = threading.Thread(target=perform_installation)
             thread.daemon = True  # Allow program to exit even if thread is still running
             thread.start()
@@ -1586,9 +1612,9 @@ class MainWindow(Gtk.Window):
     def on_task_complete(self, dialog, success, message):
         """Handle tasl completion"""
         # Update UI
-        message_type=Gtk.MessageType.INFO
+        message_type = Gtk.MessageType.INFO
         if not success:
-            message_type=Gtk.MessageType.ERROR
+            message_type = Gtk.MessageType.ERROR
         if message:
             finished_dialog = Gtk.MessageDialog(
                 transient_for=self,
@@ -1596,14 +1622,13 @@ class MainWindow(Gtk.Window):
                 destroy_with_parent=True,
                 message_type=message_type,
                 buttons=Gtk.ButtonsType.OK,
-                text=message
+                text=message,
             )
             finished_dialog.run()
             finished_dialog.destroy()
         self.refresh_local()
         self.refresh_current_page()
         self.waiting_dialog.destroy()
-
 
     def on_remove_clicked(self, button, app):
         """Handle the Remove button click with removal options"""
@@ -1705,7 +1730,7 @@ class MainWindow(Gtk.Window):
     def on_donate_clicked(self, button, app):
         """Handle the Donate button click"""
         details = app.get_details()
-        donation_url = details.get('urls', {}).get('donation', '')
+        donation_url = details.get("urls", {}).get("donation", "")
         if donation_url:
             try:
                 Gio.AppInfo.launch_default_for_uri(donation_url, None)
@@ -1733,13 +1758,15 @@ class MainWindow(Gtk.Window):
                     destroy_with_parent=True,
                     message_type=message_type,
                     buttons=Gtk.ButtonsType.OK,
-                    text=message
+                    text=message,
                 )
                 dialog.run()
                 dialog.destroy()
         else:
             checkbox.get_style_context().add_class("dim-label")
-            success, message = libflatpak_query.repotoggle(repo.get_name(), False, self.system_mode)
+            success, message = libflatpak_query.repotoggle(
+                repo.get_name(), False, self.system_mode
+            )
             message_type = Gtk.MessageType.INFO
             if success:
                 self.refresh_local()
@@ -1753,7 +1780,7 @@ class MainWindow(Gtk.Window):
                     destroy_with_parent=True,
                     message_type=message_type,
                     buttons=Gtk.ButtonsType.OK,
-                    text=message
+                    text=message,
                 )
                 dialog.run()
                 dialog.destroy()
@@ -1766,7 +1793,7 @@ class MainWindow(Gtk.Window):
             destroy_with_parent=True,
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.YES_NO,
-            text=f"Are you sure you want to delete the '{repo.get_name()}' repository?"
+            text=f"Are you sure you want to delete the '{repo.get_name()}' repository?",
         )
 
         response = dialog.run()
@@ -1776,7 +1803,7 @@ class MainWindow(Gtk.Window):
             try:
                 libflatpak_query.repodelete(repo.get_name(), self.system_mode)
                 self.refresh_local()
-                self.show_category_apps('repositories')
+                self.show_category_apps("repositories")
             except GLib.GError as e:
                 # Handle polkit authentication failure
                 if "not allowed for user" in str(e):
@@ -1787,7 +1814,7 @@ class MainWindow(Gtk.Window):
                         message_type=Gtk.MessageType.ERROR,
                         buttons=Gtk.ButtonsType.OK,
                         text="You don't have permission to remove this repository. "
-                            "Please try running the application with sudo privileges."
+                        "Please try running the application with sudo privileges.",
                     )
                     error_dialog.run()
                     error_dialog.destroy()
@@ -1799,7 +1826,7 @@ class MainWindow(Gtk.Window):
                         destroy_with_parent=True,
                         message_type=Gtk.MessageType.ERROR,
                         buttons=Gtk.ButtonsType.OK,
-                        text=f"Failed to remove repository: {str(e)}"
+                        text=f"Failed to remove repository: {str(e)}",
                     )
                     error_dialog.run()
                     error_dialog.destroy()
@@ -1807,7 +1834,9 @@ class MainWindow(Gtk.Window):
     def on_add_flathub_repo_button_clicked(self, button):
         """Handle the Add Flathub Repository button click"""
         # Add the repository
-        success, error_message = libflatpak_query.repoadd("https://dl.flathub.org/repo/flathub.flatpakrepo", self.system_mode)
+        success, error_message = libflatpak_query.repoadd(
+            "https://dl.flathub.org/repo/flathub.flatpakrepo", self.system_mode
+        )
         if error_message:
             error_dialog = Gtk.MessageDialog(
                 transient_for=None,  # Changed from self
@@ -1815,17 +1844,19 @@ class MainWindow(Gtk.Window):
                 destroy_with_parent=True,
                 message_type=Gtk.MessageType.ERROR,
                 buttons=Gtk.ButtonsType.OK,
-                text=error_message
+                text=error_message,
             )
             error_dialog.run()
             error_dialog.destroy()
         self.refresh_local()
-        self.show_category_apps('repositories')
+        self.show_category_apps("repositories")
 
     def on_add_flathub_beta_repo_button_clicked(self, button):
         """Handle the Add Flathub Beta Repository button click"""
         # Add the repository
-        success, error_message = libflatpak_query.repoadd("https://dl.flathub.org/beta-repo/flathub-beta.flatpakrepo", self.system_mode)
+        success, error_message = libflatpak_query.repoadd(
+            "https://dl.flathub.org/beta-repo/flathub-beta.flatpakrepo", self.system_mode
+        )
         if error_message:
             error_dialog = Gtk.MessageDialog(
                 transient_for=None,  # Changed from self
@@ -1833,12 +1864,12 @@ class MainWindow(Gtk.Window):
                 destroy_with_parent=True,
                 message_type=Gtk.MessageType.ERROR,
                 buttons=Gtk.ButtonsType.OK,
-                text=error_message
+                text=error_message,
             )
             error_dialog.run()
             error_dialog.destroy()
         self.refresh_local()
-        self.show_category_apps('repositories')
+        self.show_category_apps("repositories")
 
     def on_add_repo_button_clicked(self, button=None, file_path=None):
         """Handle the Add Repository button click"""
@@ -1856,14 +1887,11 @@ class MainWindow(Gtk.Window):
                 title="Select Repository File",
                 parent=self,
                 action=Gtk.FileChooserAction.OPEN,
-                flags=0
+                flags=0,
             )
 
             # Add buttons using the new method
-            dialog.add_buttons(
-                "Cancel", Gtk.ResponseType.CANCEL,
-                "Open", Gtk.ResponseType.OK
-            )
+            dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Open", Gtk.ResponseType.OK)
 
             # Add filter for .flatpakrepo files
             repo_filter = Gtk.FileFilter()
@@ -1898,9 +1926,13 @@ class MainWindow(Gtk.Window):
             content_area.pack_start(Gtk.Label(label=f"Install {file_path}?"), False, False, 0)
 
             if self.system_mode is False:
-                content_area.pack_start(Gtk.Label(label="Installation Type: User"), False, False, 0)
+                content_area.pack_start(
+                    Gtk.Label(label="Installation Type: User"), False, False, 0
+                )
             else:
-                content_area.pack_start(Gtk.Label(label="Installation Type: System"), False, False, 0)
+                content_area.pack_start(
+                    Gtk.Label(label="Installation Type: System"), False, False, 0
+                )
             dialog.show_all()
             response = dialog.run()
             repo_file_path = file_path
@@ -1916,23 +1948,24 @@ class MainWindow(Gtk.Window):
                     destroy_with_parent=True,
                     message_type=Gtk.MessageType.ERROR,
                     buttons=Gtk.ButtonsType.OK,
-                    text=error_message
+                    text=error_message,
                 )
                 error_dialog.run()
                 error_dialog.destroy()
             self.refresh_local()
-            self.show_category_apps('repositories')
+            self.show_category_apps("repositories")
 
     def select_default_category(self):
         # Select Trending by default
-        if 'collections' in self.category_widgets and self.category_widgets['collections']:
-            self.on_category_clicked('trending', 'collections')
+        if "collections" in self.category_widgets and self.category_widgets["collections"]:
+            self.on_category_clicked("trending", "collections")
+
 
 def main():
     # Check for command line argument
     if len(sys.argv) > 1:
         arg = sys.argv[1]
-        if arg.endswith('.flatpakref'):
+        if arg.endswith(".flatpakref"):
             # Create a temporary window just to handle the installation
             app = MainWindow()
             app.handle_flatpakref_file(arg)
@@ -1940,7 +1973,7 @@ def main():
             GLib.timeout_add_seconds(5, Gtk.main_quit)
             Gtk.main()
             return
-        if arg.endswith('.flatpakrepo'):
+        if arg.endswith(".flatpakrepo"):
             # Create a temporary window just to handle the installation
             app = MainWindow()
             app.handle_flatpakrepo_file(arg)
@@ -1952,6 +1985,7 @@ def main():
     app.connect("destroy", Gtk.main_quit)
     app.show_all()
     Gtk.main()
+
 
 if __name__ == "__main__":
     main()

@@ -34,32 +34,35 @@
 
 
 import gi
+
 gi.require_version("AppStream", "1.0")
 gi.require_version("Flatpak", "1.0")
 
-from gi.repository import Flatpak, GLib, Gio, AppStream
-from pathlib import Path
-import logging
-from enum import IntEnum
 import argparse
-import requests
-from urllib.parse import quote_plus, urlparse
-import tempfile
+import json
+import logging
 import os
 import sys
-import json
+import tempfile
 import time
+from enum import IntEnum
+from pathlib import Path
+from urllib.parse import quote_plus, urlparse
 
+import requests
+from gi.repository import AppStream, Flatpak, Gio, GLib
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 class Match(IntEnum):
     NAME = 1
     ID = 2
     SUMMARY = 3
     NONE = 4
+
 
 class AppStreamComponentKind(IntEnum):
     """AppStream Component Kind enumeration."""
@@ -115,6 +118,7 @@ class AppStreamComponentKind(IntEnum):
     ICON_THEME = 16
     """An icon theme following the XDG specification."""
 
+
 class AppStreamPackage:
     def __init__(self, comp: AppStream.Component, remote: Flatpak.Remote) -> None:
         self.component: AppStream.Component = comp
@@ -150,7 +154,7 @@ class AppStreamPackage:
         return self.component.get_summary()
 
     @property
-    def version(self) -> str|None:
+    def version(self) -> str | None:
         releases = self.component.get_releases_plain()
         if releases:
             release = releases.index_safe(0)
@@ -173,7 +177,9 @@ class AppStreamPackage:
         icons = self.component.get_icons()
 
         # Find the first REMOTE icon
-        remote_icon = next((icon for icon in icons if icon.get_kind() == AppStream.IconKind.REMOTE), None)
+        remote_icon = next(
+            (icon for icon in icons if icon.get_kind() == AppStream.IconKind.REMOTE), None
+        )
         return remote_icon.get_url() if remote_icon else ""
 
     def _get_icon_filename(self) -> str:
@@ -181,21 +187,24 @@ class AppStreamPackage:
         icons = self.component.get_icons()
 
         # Find the first CACHED icon
-        cached_icon = next((icon for icon in icons if icon.get_kind() == AppStream.IconKind.CACHED), None)
+        cached_icon = next(
+            (icon for icon in icons if icon.get_kind() == AppStream.IconKind.CACHED), None
+        )
         return cached_icon.get_filename() if cached_icon else ""
 
     def _get_icon_cache_path(self, size: str) -> str:
-
         # Appstream icon cache path for the flatpak repo queried
-        icon_cache_path = Path(self.remote.get_appstream_dir().get_path() + "/icons/flatpak/" + size + "/")
+        icon_cache_path = Path(
+            self.remote.get_appstream_dir().get_path() + "/icons/flatpak/" + size + "/"
+        )
         return str(icon_cache_path)
 
     def _get_urls(self) -> dict:
         """Get URLs from the component"""
         urls = {
-            'donation': self._get_url('donation'),
-            'homepage': self._get_url('homepage'),
-            'bugtracker': self._get_url('bugtracker')
+            "donation": self._get_url("donation"),
+            "homepage": self._get_url("homepage"),
+            "bugtracker": self._get_url("bugtracker"),
         }
         return urls
 
@@ -244,12 +253,13 @@ class AppStreamPackage:
             "icon_filename": self.icon_filename,
             "urls": self.urls,
             "developer": self.developer,
-            #"architectures": self.architectures,
+            # "architectures": self.architectures,
             "categories": self.categories,
             "bundle_id": self.flatpak_bundle,
             "match_type": self.match.name,
-            "repo": self.repo_name
+            "repo": self.repo_name,
         }
+
 
 class AppstreamSearcher:
     """Flatpak AppStream Package seacher"""
@@ -261,133 +271,133 @@ class AppstreamSearcher:
 
         # Define category groups and their titles
         self.category_groups = {
-            'system': {
-                'installed': 'Installed',
-                'updates': 'Updates',
-                'repositories': 'Repositories'
+            "system": {
+                "installed": "Installed",
+                "updates": "Updates",
+                "repositories": "Repositories",
             },
-            'collections': {
-                'trending': 'Trending',
-                'popular': 'Popular',
-                'recently-added': 'New',
-                'recently-updated': 'Updated'
+            "collections": {
+                "trending": "Trending",
+                "popular": "Popular",
+                "recently-added": "New",
+                "recently-updated": "Updated",
             },
-            'categories': {
-                'office': 'Productivity',
-                'graphics': 'Graphics & Photography',
-                'audiovideo': 'Audio & Video',
-                'education': 'Education',
-                'network': 'Networking',
-                'game': 'Games',
-                'development': 'Developer Tools',
-                'science': 'Science',
-                'system': 'System',
-                'utility': 'Utilities'
-            }
+            "categories": {
+                "office": "Productivity",
+                "graphics": "Graphics & Photography",
+                "audiovideo": "Audio & Video",
+                "education": "Education",
+                "network": "Networking",
+                "game": "Games",
+                "development": "Developer Tools",
+                "science": "Science",
+                "system": "System",
+                "utility": "Utilities",
+            },
         }
 
         self.subcategory_groups = {
-            'audiovideo': {
-                'audiovideoediting': 'Audio & Video Editing',
-                'discburning': 'Disc Burning',
-                'midi': 'Midi',
-                'mixer': 'Mixer',
-                'player': 'Player',
-                'recorder': 'Recorder',
-                'sequencer': 'Sequencer',
-                'tuner': 'Tuner',
-                'tv': 'TV'
+            "audiovideo": {
+                "audiovideoediting": "Audio & Video Editing",
+                "discburning": "Disc Burning",
+                "midi": "Midi",
+                "mixer": "Mixer",
+                "player": "Player",
+                "recorder": "Recorder",
+                "sequencer": "Sequencer",
+                "tuner": "Tuner",
+                "tv": "TV",
             },
-            'development': {
-                'building': 'Building',
-                'database': 'Database',
-                'debugger': 'Debugger',
-                'guidesigner': 'GUI Designer',
-                'ide': 'IDE',
-                'profiling': 'Profiling',
-                'revisioncontrol': 'Revision Control',
-                'translation': 'Translation',
-                'webdevelopment': 'Web Development'
+            "development": {
+                "building": "Building",
+                "database": "Database",
+                "debugger": "Debugger",
+                "guidesigner": "GUI Designer",
+                "ide": "IDE",
+                "profiling": "Profiling",
+                "revisioncontrol": "Revision Control",
+                "translation": "Translation",
+                "webdevelopment": "Web Development",
             },
-            'game': {
-                'actiongame': 'Action Games',
-                'adventuregame': 'Adventure Games',
-                'arcadegame': 'Arcade Games',
-                'blocksgame': 'Blocks Games',
-                'boardgame': 'Board Games',
-                'cardgame': 'Card Games',
-                'emulator': 'Emulators',
-                'kidsgame': 'Kids\' Games',
-                'logicgame': 'Logic Games',
-                'roleplaying': 'Role Playing',
-                'shooter': 'Shooter',
-                'simulation': 'Simulation',
-                'sportsgame': 'Sports Games',
-                'strategygame': 'Strategy Games'
+            "game": {
+                "actiongame": "Action Games",
+                "adventuregame": "Adventure Games",
+                "arcadegame": "Arcade Games",
+                "blocksgame": "Blocks Games",
+                "boardgame": "Board Games",
+                "cardgame": "Card Games",
+                "emulator": "Emulators",
+                "kidsgame": "Kids' Games",
+                "logicgame": "Logic Games",
+                "roleplaying": "Role Playing",
+                "shooter": "Shooter",
+                "simulation": "Simulation",
+                "sportsgame": "Sports Games",
+                "strategygame": "Strategy Games",
             },
-            'graphics': {
-                '2dgraphics': '2D Graphics',
-                '3dgraphics': '3D Graphics',
-                'ocr': 'OCR',
-                'photography': 'Photography',
-                'publishing': 'Publishing',
-                'rastergraphics': 'Raster Graphics',
-                'scanning': 'Scanning',
-                'vectorgraphics': 'Vector Graphics',
-                'viewer': 'Viewer'
+            "graphics": {
+                "2dgraphics": "2D Graphics",
+                "3dgraphics": "3D Graphics",
+                "ocr": "OCR",
+                "photography": "Photography",
+                "publishing": "Publishing",
+                "rastergraphics": "Raster Graphics",
+                "scanning": "Scanning",
+                "vectorgraphics": "Vector Graphics",
+                "viewer": "Viewer",
             },
-            'network': {
-                'chat': 'Chat',
-                'email': 'Email',
-                'feed': 'Feed',
-                'filetransfer': 'File Transfer',
-                'hamradio': 'Ham Radio',
-                'instantmessaging': 'Instant Messaging',
-                'ircclient': 'IRC Client',
-                'monitor': 'Monitor',
-                'news': 'News',
-                'p2p': 'P2P',
-                'remoteaccess': 'Remote Access',
-                'telephony': 'Telephony',
-                'videoconference': 'Video Conference',
-                'webbrowser': 'Web Browser',
-                'webdevelopment': 'Web Development'
+            "network": {
+                "chat": "Chat",
+                "email": "Email",
+                "feed": "Feed",
+                "filetransfer": "File Transfer",
+                "hamradio": "Ham Radio",
+                "instantmessaging": "Instant Messaging",
+                "ircclient": "IRC Client",
+                "monitor": "Monitor",
+                "news": "News",
+                "p2p": "P2P",
+                "remoteaccess": "Remote Access",
+                "telephony": "Telephony",
+                "videoconference": "Video Conference",
+                "webbrowser": "Web Browser",
+                "webdevelopment": "Web Development",
             },
-            'office': {
-                'calendar': 'Calendar',
-                'chart': 'Chart',
-                'contactmanagement': 'Contact Management',
-                'database': 'Database',
-                'dictionary': 'Dictionary',
-                'email': 'Email',
-                'finance': 'Finance',
-                'presentation': 'Presentation',
-                'projectmanagement': 'Project Management',
-                'publishing': 'Publishing',
-                'spreadsheet': 'Spreadsheet',
-                'viewer': 'Viewer',
-                'wordprocessor': 'Word Processor'
+            "office": {
+                "calendar": "Calendar",
+                "chart": "Chart",
+                "contactmanagement": "Contact Management",
+                "database": "Database",
+                "dictionary": "Dictionary",
+                "email": "Email",
+                "finance": "Finance",
+                "presentation": "Presentation",
+                "projectmanagement": "Project Management",
+                "publishing": "Publishing",
+                "spreadsheet": "Spreadsheet",
+                "viewer": "Viewer",
+                "wordprocessor": "Word Processor",
             },
-            'system': {
-                'emulator': 'Emulators',
-                'filemanager': 'File Manager',
-                'filesystem': 'Filesystem',
-                'filetools': 'File Tools',
-                'monitor': 'Monitor',
-                'security': 'Security',
-                'terminalemulator': 'Terminal Emulator'
+            "system": {
+                "emulator": "Emulators",
+                "filemanager": "File Manager",
+                "filesystem": "Filesystem",
+                "filetools": "File Tools",
+                "monitor": "Monitor",
+                "security": "Security",
+                "terminalemulator": "Terminal Emulator",
             },
-            'utility': {
-                'accessibility': 'Accessibility',
-                'archiving': 'Archiving',
-                'calculator': 'Calculator',
-                'clock': 'Clock',
-                'compression': 'Compression',
-                'filetools': 'File Tools',
-                'telephonytools': 'Telephony Tools',
-                'texteditor': 'Text Editor',
-                'texttools': 'Text Tools'
-            }
+            "utility": {
+                "accessibility": "Accessibility",
+                "archiving": "Archiving",
+                "calculator": "Calculator",
+                "clock": "Clock",
+                "compression": "Compression",
+                "filetools": "File Tools",
+                "telephonytools": "Telephony Tools",
+                "texteditor": "Text Editor",
+                "texttools": "Text Tools",
+            },
         }
 
     def add_installation(self, inst: Flatpak.Installation):
@@ -402,7 +412,10 @@ class AppstreamSearcher:
         remote_name = remote.get_name()
         if remote_name not in self.remotes:
             self.remotes[remote_name] = self._load_appstream_metadata(remote, inst)
-    def _load_appstream_metadata(self, remote: Flatpak.Remote, inst: Flatpak.Installation) -> list[AppStreamPackage]:
+
+    def _load_appstream_metadata(
+        self, remote: Flatpak.Remote, inst: Flatpak.Installation
+    ) -> list[AppStreamPackage]:
         """load AppStrean metadata and create AppStreamPackage objects"""
         packages = []
         metadata = AppStream.Metadata.new()
@@ -422,12 +435,14 @@ class AppstreamSearcher:
             except GLib.Error as e:
                 logger.error(f"Failed to update AppStream metadata: {str(e)}")
         if appstream_file.exists():
-            metadata.parse_file(Gio.File.new_for_path(appstream_file.as_posix()), AppStream.FormatKind.XML)
+            metadata.parse_file(
+                Gio.File.new_for_path(appstream_file.as_posix()), AppStream.FormatKind.XML
+            )
             components: AppStream.ComponentBox = metadata.get_components()
             i = 0
             for i in range(components.get_size()):
                 component = components.index_safe(i)
-                #if component.get_kind() == AppStream.ComponentKind.DESKTOP_APP:
+                # if component.get_kind() == AppStream.ComponentKind.DESKTOP_APP:
                 packages.append(AppStreamPackage(component, remote))
             return packages
         else:
@@ -459,7 +474,6 @@ class AppstreamSearcher:
             search_results.append(found)
         return search_results
 
-
     def search_flatpak(self, keyword: str, repo_name=None) -> list[AppStreamPackage]:
         """Search packages matching a keyword"""
         search_results = []
@@ -472,7 +486,6 @@ class AppstreamSearcher:
             if repo_name in self.remotes.keys():
                 search_results.extend(self.search_flatpak_repo(keyword, repo_name))
         return search_results
-
 
     def get_all_apps(self, repo_name=None) -> list[AppStreamPackage]:
         """Get all available apps from specified or all repositories"""
@@ -509,7 +522,9 @@ class AppstreamSearcher:
 
         return categories
 
-    def get_subcategories_summary(self, repo_name=None) -> list[tuple[str, str, list[AppStreamPackage]]]:
+    def get_subcategories_summary(
+        self, repo_name=None
+    ) -> list[tuple[str, str, list[AppStreamPackage]]]:
         """Get a summary of all apps grouped by category and subcategory."""
         apps = self.get_all_apps(repo_name)
         subcategories = []
@@ -546,8 +561,11 @@ class AppstreamSearcher:
 
         # Remove duplicates while maintaining order
         seen = set()
-        unique_installed = [(ref, repo, repo_type) for ref, repo, repo_type in installed_refs
-                        if not (ref in seen or seen.add(ref))]
+        unique_installed = [
+            (ref, repo, repo_type)
+            for ref, repo, repo_type in installed_refs
+            if not (ref in seen or seen.add(ref))
+        ]
 
         return unique_installed
 
@@ -579,7 +597,7 @@ class AppstreamSearcher:
             encoded_category = quote_plus(category)
 
             # Determine the base URL based on category type
-            if category in self.category_groups['collections']:
+            if category in self.category_groups["collections"]:
                 url = f"https://flathub.org/api/v2/collection/{encoded_category}"
             else:
                 url = f"https://flathub.org/api/v2/collection/category/{encoded_category}"
@@ -590,13 +608,10 @@ class AppstreamSearcher:
                 data = response.json()
 
                 # If this is a collections category, save it to our collections database
-                if category in self.category_groups['collections']:
-                    if not hasattr(self, 'collections_db'):
+                if category in self.category_groups["collections"]:
+                    if not hasattr(self, "collections_db"):
                         self.collections_db = []
-                    self.collections_db.append({
-                        'category': category,
-                        'data': data
-                    })
+                    self.collections_db.append({"category": category, "data": data})
 
                 return data
             else:
@@ -606,13 +621,13 @@ class AppstreamSearcher:
             print(f"Error fetching apps: {str(e)}")
             return None
 
-    def save_collections_data(self, filename='collections_data.json'):
+    def save_collections_data(self, filename="collections_data.json"):
         """Save all collected collections data to a JSON file."""
-        if not hasattr(self, 'collections_db') or not self.collections_db:
+        if not hasattr(self, "collections_db") or not self.collections_db:
             return
 
         try:
-            with open(filename, 'w', encoding='utf-8') as f:
+            with open(filename, "w", encoding="utf-8") as f:
                 json.dump(self.collections_db, f, indent=2, ensure_ascii=False)
         except IOError as e:
             print(f"Error saving collections data: {str(e)}")
@@ -665,20 +680,20 @@ class AppstreamSearcher:
             print(f"Error fetching apps: {str(e)}")
             return None
 
-    def save_subcategories_data(self, filename='subcategories_data.json'):
+    def save_subcategories_data(self, filename="subcategories_data.json"):
         """Save all collected subcategories data to a JSON file."""
-        if not hasattr(self, 'subcategories_results') or not self.subcategories_results:
+        if not hasattr(self, "subcategories_results") or not self.subcategories_results:
             return
 
         try:
-            with open(filename, 'w', encoding='utf-8') as f:
+            with open(filename, "w", encoding="utf-8") as f:
                 json.dump(self.subcategories_results, f, indent=2, ensure_ascii=False)
         except IOError as e:
             print(f"Error saving subcategories data: {str(e)}")
 
     def update_subcategories_data(self):
         """Fetch and store data for all subcategories."""
-        if not hasattr(self, 'subcategories_results'):
+        if not hasattr(self, "subcategories_results"):
             self.subcategories_results = []
 
         # Process each category and its subcategories
@@ -686,17 +701,14 @@ class AppstreamSearcher:
             for subcategory, title in subcategories.items():
                 api_data = self.fetch_flathub_subcategory_apps(category, subcategory)
                 if api_data:
-                    self.subcategories_results.append({
-                        'category': category,
-                        'subcategory': subcategory,
-                        'data': api_data
-                    })
+                    self.subcategories_results.append(
+                        {"category": category, "subcategory": subcategory, "data": api_data}
+                    )
 
         # Save the collected data
         self.save_subcategories_data()
 
     def refresh_local(self, system=False):
-
         # make sure to reset these to empty before refreshing.
         self.installed_results = []  # Initialize empty list
         self.updates_results = []  # Initialize empty list
@@ -726,7 +738,6 @@ class AppstreamSearcher:
         # make sure to reset these to empty before refreshing.
         return self.installed_results, self.updates_results
 
-
     def retrieve_metadata(self, system=False):
         """Retrieve and refresh metadata for Flatpak repositories."""
         self._initialize_metadata()
@@ -752,7 +763,7 @@ class AppstreamSearcher:
         """Handle metadata retrieval when offline."""
         json_path = "collections_data.json"
         try:
-            with open(json_path, 'r', encoding='utf-8') as f:
+            with open(json_path, "r", encoding="utf-8") as f:
                 collections_data = json.load(f)
                 return self._process_offline_data(collections_data)
         except (IOError, json.JSONDecodeError) as e:
@@ -762,7 +773,7 @@ class AppstreamSearcher:
         # Also load subcategories data
         subcategories_path = "subcategories_data.json"
         try:
-            with open(subcategories_path, 'r', encoding='utf-8') as f:
+            with open(subcategories_path, "r", encoding="utf-8") as f:
                 subcategories_data = json.load(f)
                 self.subcategories_results = subcategories_data
         except (IOError, json.JSONDecodeError) as e:
@@ -772,11 +783,11 @@ class AppstreamSearcher:
     def _process_offline_data(self, collections_data):
         """Process cached collections data when offline."""
         for collection in collections_data:
-            category = collection['category']
-            if category in self.category_groups['collections']:
-                apps = [app['app_id'] for app in collection['data'].get('hits', [])]
+            category = collection["category"]
+            if category in self.category_groups["collections"]:
+                apps = [app["app_id"] for app in collection["data"].get("hits", [])]
                 for app_id in apps:
-                    search_result = self.search_flatpak(app_id, 'flathub')
+                    search_result = self.search_flatpak(app_id, "flathub")
                     self.collection_results.extend(search_result)
         return self._get_current_results()
 
@@ -787,7 +798,7 @@ class AppstreamSearcher:
 
         for group_name, categories in self.category_groups.items():
             for category, title in categories.items():
-                if category not in self.category_groups['system']:
+                if category not in self.category_groups["system"]:
                     self._process_category(searcher, category, current_category, total_categories)
                 else:
                     self._process_system_category(searcher, category, system)
@@ -801,7 +812,7 @@ class AppstreamSearcher:
         """Process a single category and retrieve its metadata."""
         json_path = "collections_data.json"
         try:
-            with open(json_path, 'r', encoding='utf-8') as f:
+            with open(json_path, "r", encoding="utf-8") as f:
                 collections_data = json.load(f)
                 self._update_from_collections(collections_data, category)
         except (IOError, json.JSONDecodeError) as e:
@@ -815,10 +826,10 @@ class AppstreamSearcher:
     def _update_from_collections(self, collections_data, category):
         """Update results from cached collections data."""
         for collection in collections_data:
-            if collection['category'] == category:
-                apps = [app['app_id'] for app in collection['data'].get('hits', [])]
+            if collection["category"] == category:
+                apps = [app["app_id"] for app in collection["data"].get("hits", [])]
                 for app_id in apps:
-                    search_result = self.search_flatpak(app_id, 'flathub')
+                    search_result = self.search_flatpak(app_id, "flathub")
                     self.collection_results.extend(search_result)
 
     def _should_refresh(self):
@@ -835,11 +846,11 @@ class AppstreamSearcher:
         try:
             api_data = self.fetch_flathub_category_apps(category)
             if api_data:
-                apps = api_data['hits']
+                apps = api_data["hits"]
                 for app in apps:
-                    app_id = app['app_id']
-                    search_result = searcher.search_flatpak(app_id, 'flathub')
-                    if category in self.category_groups['collections']:
+                    app_id = app["app_id"]
+                    search_result = searcher.search_flatpak(app_id, "flathub")
+                    if category in self.category_groups["collections"]:
                         self.update_collection_results(search_result)
                     else:
                         self.category_results.extend(search_result)
@@ -869,8 +880,9 @@ class AppstreamSearcher:
             self.subcategories_results,
             self.installed_results,
             self.updates_results,
-            self.all_apps
+            self.all_apps,
         )
+
 
 def install_flatpak(app: AppStreamPackage, repo_name=None, system=False) -> tuple[bool, str]:
     """
@@ -901,12 +913,13 @@ def install_flatpak(app: AppStreamPackage, repo_name=None, system=False) -> tupl
         return False, f"Installation failed: {e}"
     return True, f"Successfully installed {app.id}"
 
+
 def install_flatpakref(ref_file, system=False):
     """Add a new repository using a .flatpakrepo file"""
     # Get existing repositories
     installation = get_installation(system)
 
-    if not ref_file.endswith('.flatpakref'):
+    if not ref_file.endswith(".flatpakref"):
         return False, "Flatpak ref file path or URL must end with .flatpakref extension."
 
     if not os.path.exists(ref_file):
@@ -914,7 +927,7 @@ def install_flatpakref(ref_file, system=False):
 
     # Read the flatpakref file
     try:
-        with open(ref_file, 'rb') as f:
+        with open(ref_file, "rb") as f:
             repo_data = f.read()
     except IOError as e:
         return False, f"Failed to read flatpakref file: {str(e)}"
@@ -963,6 +976,7 @@ def remove_flatpak(app: AppStreamPackage, repo_name=None, system=False) -> tuple
         return False, f"Failed to remove {app.id}: {e}"
     return True, f"Successfully removed {app.id}"
 
+
 def update_flatpak(app: AppStreamPackage, repo_name=None, system=False) -> tuple[bool, str]:
     """
     Remove a Flatpak package using transactions.
@@ -990,6 +1004,7 @@ def update_flatpak(app: AppStreamPackage, repo_name=None, system=False) -> tuple
         return False, f"Failed to update {app.id}: {e}"
     return True, f"Successfully updated {app.id}"
 
+
 def get_installation(system=False):
     if system is False:
         installation = Flatpak.Installation.new_user()
@@ -997,19 +1012,22 @@ def get_installation(system=False):
         installation = Flatpak.Installation.new_system()
     return installation
 
+
 def get_reposearcher(system=False, refresh=False):
     installation = get_installation(system)
     searcher = AppstreamSearcher(refresh)
     searcher.add_installation(installation)
     return searcher
 
+
 def check_internet():
     """Check if internet connection is available."""
     try:
-        requests.head('https://flathub.org', timeout=3)
+        requests.head("https://flathub.org", timeout=3)
         return True
     except requests.ConnectionError:
         return False
+
 
 def repotoggle(repo, toggle=True, system=False):
     """
@@ -1036,10 +1054,7 @@ def repotoggle(repo, toggle=True, system=False):
         remote.set_disabled(not toggle)
 
         # Modify the remote's disabled status
-        success = installation.modify_remote(
-            remote,
-            None
-        )
+        success = installation.modify_remote(remote, None)
         if success:
             if toggle:
                 message = f"Successfully enabled {repo}."
@@ -1052,14 +1067,17 @@ def repotoggle(repo, toggle=True, system=False):
 
     return False, "Operation failed"
 
+
 def repolist(system=False):
     installation = get_installation(system)
     repos = installation.list_remotes()
     return repos
 
+
 def repodelete(repo, system=False):
     installation = get_installation(system)
     installation.remove_remote(repo)
+
 
 def repoadd(repofile, system=False):
     """Add a new repository using a .flatpakrepo file"""
@@ -1067,7 +1085,7 @@ def repoadd(repofile, system=False):
     installation = get_installation(system)
     existing_repos = installation.list_remotes()
 
-    if not repofile.endswith('.flatpakrepo'):
+    if not repofile.endswith(".flatpakrepo"):
         return False, "Repository file path or URL must end with .flatpakrepo extension."
 
     if repofile_is_url(repofile):
@@ -1082,7 +1100,7 @@ def repoadd(repofile, system=False):
         return False, f"Repository file '{repofile}' does not exist."
 
     # Get repository title from file name
-    title = os.path.basename(repofile).replace('.flatpakrepo', '')
+    title = os.path.basename(repofile).replace(".flatpakrepo", "")
 
     # Check for duplicate title (case insensitive)
     existing_titles = [repo.get_name().casefold() for repo in existing_repos]
@@ -1092,7 +1110,7 @@ def repoadd(repofile, system=False):
 
     # Read the repository file
     try:
-        with open(repofile, 'rb') as f:
+        with open(repofile, "rb") as f:
             repo_data = f.read()
     except IOError as e:
         return False, f"Failed to read repository file: {str(e)}"
@@ -1105,8 +1123,8 @@ def repoadd(repofile, system=False):
         remote = Flatpak.Remote.new_from_file(title, repo_bytes)
 
         # Get URLs and normalize them by removing trailing slashes
-        new_url = remote.get_url().rstrip('/')
-        existing_urls = [repo.get_url().rstrip('/') for repo in existing_repos]
+        new_url = remote.get_url().rstrip("/")
+        existing_urls = [repo.get_url().rstrip("/") for repo in existing_repos]
 
         # Check if URL already exists
         if new_url in existing_urls:
@@ -1120,6 +1138,7 @@ def repoadd(repofile, system=False):
         return False, f"Failed to add repository: {str(e)}"
     return True, f"{remote.get_name()} repository successfully added for {user} installation."
 
+
 def repofile_is_url(string):
     """Check if a string is a valid URL"""
     try:
@@ -1128,12 +1147,13 @@ def repofile_is_url(string):
     except:
         return False
 
+
 def download_repo(url):
     """Download a repository file from URL to /tmp/"""
     try:
         # Create a deterministic filename based on the URL
         url_path = urlparse(url).path
-        filename = os.path.basename(url_path) or 'repo'
+        filename = os.path.basename(url_path) or "repo"
         tmp_path = Path(tempfile.gettempdir()) / f"{filename}"
 
         # Download the file
@@ -1141,7 +1161,7 @@ def download_repo(url):
             response.raise_for_status()
 
             # Write the file in chunks, overwriting if it exists
-            with open(tmp_path, 'wb') as f:
+            with open(tmp_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
 
@@ -1153,35 +1173,44 @@ def download_repo(url):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Search Flatpak packages')
-    parser.add_argument('--id', help='Application ID to search for')
-    parser.add_argument('--repo', help='Filter results to specific repository')
-    parser.add_argument('--list-all', action='store_true', help='List all available apps')
-    parser.add_argument('--categories', action='store_true', help='Show apps grouped by category')
-    parser.add_argument('--subcategories', action='store_true',
-                       help='Show apps grouped by subcategory')
-    parser.add_argument('--list-installed', action='store_true',
-                       help='List all installed Flatpak applications')
-    parser.add_argument('--check-updates', action='store_true',
-                       help='Check for available updates')
-    parser.add_argument('--list-repos', action='store_true',
-                       help='List all configured Flatpak repositories')
-    parser.add_argument('--add-repo', type=str, metavar='REPO_FILE',
-                       help='Add a new repository from a .flatpakrepo file')
-    parser.add_argument('--remove-repo', type=str, metavar='REPO_NAME',
-                       help='Remove a Flatpak repository')
-    parser.add_argument('--toggle-repo', type=str,
-                       metavar=('ENABLE/DISABLE'),
-                       help='Enable or disable a repository')
-    parser.add_argument('--install', type=str, metavar='APP_ID',
-                       help='Install a Flatpak package')
-    parser.add_argument('--remove', type=str, metavar='APP_ID',
-                       help='Remove a Flatpak package')
-    parser.add_argument('--update', type=str, metavar='APP_ID',
-                       help='Update a Flatpak package')
-    parser.add_argument('--system', action='store_true', help='Install as system instead of user')
-    parser.add_argument('--refresh', action='store_true', help='Install as system instead of user')
-    parser.add_argument('--refresh-local', action='store_true', help='Install as system instead of user')
+    parser = argparse.ArgumentParser(description="Search Flatpak packages")
+    parser.add_argument("--id", help="Application ID to search for")
+    parser.add_argument("--repo", help="Filter results to specific repository")
+    parser.add_argument("--list-all", action="store_true", help="List all available apps")
+    parser.add_argument("--categories", action="store_true", help="Show apps grouped by category")
+    parser.add_argument(
+        "--subcategories", action="store_true", help="Show apps grouped by subcategory"
+    )
+    parser.add_argument(
+        "--list-installed", action="store_true", help="List all installed Flatpak applications"
+    )
+    parser.add_argument("--check-updates", action="store_true", help="Check for available updates")
+    parser.add_argument(
+        "--list-repos", action="store_true", help="List all configured Flatpak repositories"
+    )
+    parser.add_argument(
+        "--add-repo",
+        type=str,
+        metavar="REPO_FILE",
+        help="Add a new repository from a .flatpakrepo file",
+    )
+    parser.add_argument(
+        "--remove-repo", type=str, metavar="REPO_NAME", help="Remove a Flatpak repository"
+    )
+    parser.add_argument(
+        "--toggle-repo",
+        type=str,
+        metavar=("ENABLE/DISABLE"),
+        help="Enable or disable a repository",
+    )
+    parser.add_argument("--install", type=str, metavar="APP_ID", help="Install a Flatpak package")
+    parser.add_argument("--remove", type=str, metavar="APP_ID", help="Remove a Flatpak package")
+    parser.add_argument("--update", type=str, metavar="APP_ID", help="Update a Flatpak package")
+    parser.add_argument("--system", action="store_true", help="Install as system instead of user")
+    parser.add_argument("--refresh", action="store_true", help="Install as system instead of user")
+    parser.add_argument(
+        "--refresh-local", action="store_true", help="Install as system instead of user"
+    )
 
     args = parser.parse_args()
 
@@ -1244,24 +1273,27 @@ def main():
 
     print("Missing options. Use -h for help.")
 
+
 def handle_repo_toggle(args):
     repo_name = args.repo
     if not repo_name:
         print("Error: must specify a repo.")
         sys.exit(1)
 
-    get_status = args.toggle_repo.lower() in ['true', 'enable']
+    get_status = args.toggle_repo.lower() in ["true", "enable"]
     try:
         success, message = repotoggle(repo_name, get_status, args.system)
         print(f"{message}")
     except GLib.Error as e:
         print(f"{str(e)}")
 
+
 def handle_list_repos(args):
     repos = repolist(args.system)
     print("\nConfigured Repositories:")
     for repo in repos:
         print(f"- {repo.get_name()} ({repo.get_url()})")
+
 
 def handle_add_repo(args):
     try:
@@ -1270,12 +1302,14 @@ def handle_add_repo(args):
     except GLib.Error as e:
         print(f"{str(e)}")
 
+
 def handle_remove_repo(args):
     repodelete(args.remove_repo, args.system)
     print(f"\nRepository removed successfully: {args.remove_repo}")
 
+
 def handle_install(args, searcher):
-    if args.install.endswith('.flatpakref'):
+    if args.install.endswith(".flatpakref"):
         try:
             success, message = install_flatpakref(args.install, args.system)
             result_message = f"{message}"
@@ -1295,6 +1329,7 @@ def handle_install(args, searcher):
                 pass
         print(result_message)
 
+
 def handle_remove(args, searcher):
     packagelist = searcher.search_flatpak(args.remove, args.repo)
     result_message = ""
@@ -1307,6 +1342,7 @@ def handle_remove(args, searcher):
             result_message = f"Removal of {args.remove} failed: {str(e)}"
             pass
     print(result_message)
+
 
 def handle_update(args, searcher):
     packagelist = searcher.search_flatpak(args.update, args.repo)
@@ -1321,17 +1357,20 @@ def handle_update(args, searcher):
             pass
     print(result_message)
 
+
 def handle_list_installed(args, searcher):
     installed_apps = searcher.get_installed_apps(args.system)
     print(f"\nInstalled Flatpak Applications ({len(installed_apps)}):")
     for app_id, repo_name, repo_type in installed_apps:
         print(f"{app_id} (Repository: {repo_name}, Installation: {repo_type})")
 
+
 def handle_check_updates(args, searcher):
     updates = searcher.check_updates(args.system)
     print(f"\nAvailable Updates ({len(updates)}):")
     for repo_name, app_id, repo_type in updates:
         print(f"{app_id} (Repository: {repo_name}, Installation: {repo_type})")
+
 
 def handle_list_all(args, searcher):
     apps = searcher.get_all_apps(args.repo)
@@ -1341,12 +1380,14 @@ def handle_list_all(args, searcher):
         print(f"Categories: {', '.join(details['categories'])}")
         print("-" * 50)
 
+
 def handle_categories(args, searcher):
     categories = searcher.get_categories_summary(args.repo)
     for category, apps in categories.items():
         print(f"\n{category.upper()}:")
         for app in apps:
             print(f"  - {app.name} ({app.id})")
+
 
 def handle_subcategories(args, searcher):
     """Handle showing apps grouped by subcategory."""
@@ -1355,6 +1396,7 @@ def handle_subcategories(args, searcher):
         print(f"\n{category.upper()} > {subcategory.upper()}:")
         for app in apps:
             print(f"  - {app.name} ({app.id})")
+
 
 def handle_search(args, searcher):
     if args.repo:
@@ -1377,7 +1419,7 @@ def handle_search(args, searcher):
             print(f"Icon FILE: {details['icon_filename']}")
             print(f"Developer: {details['developer']}")
             print(f"Categories: {details['categories']}")
-            urls = details['urls']
+            urls = details["urls"]
             print(f"Donation URL: {urls['donation']}")
             print(f"Homepage URL: {urls['homepage']}")
             print(f"Bug Tracker URL: {urls['bugtracker']}")
@@ -1385,6 +1427,7 @@ def handle_search(args, searcher):
             print(f"Match Type: {details['match_type']}")
             print(f"Repo: {details['repo']}")
             print("-" * 50)
+
 
 if __name__ == "__main__":
     main()
