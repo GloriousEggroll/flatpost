@@ -38,7 +38,7 @@ install:
 	@echo "Installing icon file to $(ICON_DIR)"
 	mkdir -p $(ICON_DIR)/{1024x1024,64x64}/apps
 	install -m 644 data/usr/share/icons/hicolor/1024x1024/apps/com.flatpost.flatpostapp.png $(ICON_DIR)/1024x1024/apps/com.flatpost.flatpostapp.png
-	install -m 644 data/usr/share/icons/hicolor/64x64/apps/com.flatpost.flatpostapp.png $(ICON_DIR)/64x64/apps/com.flatpost.flatpostapp.png
+	install -m 644 data/usr/share/icons/hicolor/64x64/apps/com.flatpost.flatpostapp.svg $(ICON_DIR)/64x64/apps/com.flatpost.flatpostapp.svg
 
 	@echo "Installing license file to $(LICENSE_DIR)"
 	mkdir -p $(LICENSE_DIR)
@@ -51,5 +51,5 @@ clean:
 	rm -f $(DESKTOP_DIR)/com.flatpost.flatpostapp.desktop
 	rm -f $(DATA_DIR)/collections_data.json
 	rm -f $(ICON_DIR)/1024x1024/apps/com.flatpost.flatpostapp.png
-	rm -f $(ICON_DIR)/64x64/apps/com.flatpost.flatpostapp.png
-	rm -f $(LICENSE_DIR)/com.flatpost.flatpostapp.png
+	rm -f $(ICON_DIR)/64x64/apps/com.flatpost.flatpostapp.svg
+	rm -f $(LICENSE_DIR)/LICENSE

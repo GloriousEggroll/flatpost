@@ -20,11 +20,14 @@ import pwd
 import atexit
 from datetime import datetime
 
+APP_ID = "com.flatpost.flatpostapp"
+ICON_NAME = APP_ID
+
 settings = Gtk.Settings.get_default()
 settings.set_property("gtk-theme-name", "adw-gtk3-dark")  # Replace with the exact theme name if different
 settings.set_property("gtk-application-prefer-dark-theme", True)
 
-class MainWindow(Gtk.Window):
+class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, system_mode=False, system_only_mode=False):
         app_title = "Flatpost (user mode)"
         if system_only_mode:
@@ -43,7 +46,7 @@ class MainWindow(Gtk.Window):
             self.system_switch.set_active(True)
             self.system_switch.set_sensitive(False)
         # Step 1: Verify file exists and is accessible
-        icon_path = "/usr/share/icons/hicolor/1024x1024/apps/com.flatpost.flatpostapp.png"
+        icon_path = "/usr/share/icons/hicolor/64x64/apps/com.flatpost.flatpostapp.svg"
         if not os.path.exists(icon_path):
             print("ERROR: Icon file not found!")
             return
@@ -58,12 +61,11 @@ class MainWindow(Gtk.Window):
             self.pixbuf32 = GdkPixbuf.Pixbuf.new_from_file_at_scale(icon_path, 32, 32, True)
             self.pixbuf48 = GdkPixbuf.Pixbuf.new_from_file_at_scale(icon_path, 48, 48, True)
             self.pixbuf64 = GdkPixbuf.Pixbuf.new_from_file_at_scale(icon_path, 64, 64, True)
-            self.pixbuf128 = GdkPixbuf.Pixbuf.new_from_file_at_scale(icon_path, 128, 128, True)
 
-            Gtk.Window.set_default_icon(self.pixbuf48)
+            Gtk.Window.set_default_icon(self.pixbuf64)
 
             # Set the icon list
-            self.set_icon_list([self.pixbuf16, self.pixbuf24, self.pixbuf32, self.pixbuf48, self.pixbuf64, self.pixbuf128])
+            self.set_icon_list([self.pixbuf16, self.pixbuf24, self.pixbuf32, self.pixbuf48, self.pixbuf64])
 
         except Exception as e:
             print(f"ERROR loading icon: {str(e)}")
@@ -935,7 +937,11 @@ class MainWindow(Gtk.Window):
             try:
                 # Construct command to re-execute with system mode enabled
                 script_path = Path(__file__).resolve()
-                subprocess.run(["xhost", "si:localuser:root"])
+                subprocess.run(["xhost", "si:localuser:root"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+                )
                 os.execvp(
                     "pkexec",
                     [
@@ -1342,8 +1348,6 @@ class MainWindow(Gtk.Window):
         self.show_category_apps(category)
 
 
-
-
     def refresh_current_page(self):
         """Refresh the currently displayed page"""
         if self.current_page and self.current_group:
@@ -1354,7 +1358,7 @@ class MainWindow(Gtk.Window):
                 # print(box_outer)
                 self.details_window.destroy() # Temporary solution for action buttons not updating on details window
         except:
-            print("Details_window not opened")
+            pass
 
     def update_category_header(self, category):
         """Update the category header text based on the selected category."""
@@ -4997,7 +5001,11 @@ def main():
 
         if system_mode or system_only_mode:
             if os.getuid() > 0:
-                subprocess.run(["xhost", "si:localuser:root"])
+                subprocess.run(["xhost", "si:localuser:root"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+                )
                 script_path = Path(__file__).resolve()
                 os.execvp(
                     "pkexec",
@@ -5016,7 +5024,7 @@ def main():
                         arg,
                     ]
                 )
-    GLib.set_prgname('/usr/bin/flatpost')
+    GLib.set_prgname(APP_ID)
     app = MainWindow(system_mode=system_mode, system_only_mode=system_only_mode)
     app.connect("destroy", Gtk.main_quit)
     app.show_all()
@@ -5025,7 +5033,11 @@ def main():
 def cleanup_xhost():
     """Cleanup function to run xhost on exit"""
     try:
-        subprocess.run(["xhost", "-si:localuser:root"])
+        subprocess.run(["xhost", "-si:localuser:root"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+        )
     except Exception as e:
         logger.error(f"Failed to run xhost cleanup: {e}")
         
