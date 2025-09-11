@@ -82,8 +82,7 @@ update-desktop-database -q
 %{_bindir}/flatpost
 %{_datadir}/applications/com.flatpost.flatpostapp.desktop
 %{_datadir}/flatpost/collections_data.json
-%{_datadir}/icons/hicolor/1024x1024/apps/com.flatpost.flatpostapp.png
-%{_datadir}/icons/hicolor/64x64/apps/com.flatpost.flatpostapp.png
+%{_datadir}/icons/hicolor/64x64/apps/com.flatpost.flatpostapp.svg
 %{_datadir}/mime/packages/flatpost.xml
 %license %{_datadir}/licenses/flatpost/LICENSE
 
