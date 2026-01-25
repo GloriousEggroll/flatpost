@@ -925,12 +925,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.right_container.show_all()
 
     def start_metadata_refresh(self, show_error_dialog=False, force=False):
-        logger.info("start_metadata_refresh(force=%s) loaded=%s loading=%s should_refresh=%s stamp=%s",
-                    force,
-                    getattr(self, "metadata_loaded", False),
-                    getattr(self, "metadata_loading", False),
-                    should_refresh_metadata(self.system_mode),
-                    _metadata_stamp_path(self.system_mode))
 
         if getattr(self, "metadata_loading", False):
             return
