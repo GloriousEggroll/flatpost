@@ -254,6 +254,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.current_group = None  # Track current group (system/collections/categories)
         self.current_category = None          # last clicked category/subcategory key
         self.current_category_group = None    # last clicked group
+        self.app_rows = {}  # app_id -> dict(row widgets + app ref)
+        self.enable_row_updates = True
 
         # Set window size
         self.set_default_size(1280, 720)
@@ -394,7 +396,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 'texttools': 'Text Tools'
             }
         }
-        
+
         # Initialize mouse cursor test
         # display = Gdk.Display.get_default()
         # cursor = Gdk.Cursor.new_from_name(display, "pointer");
@@ -449,7 +451,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 margin: 0;
                 font-weight: bold;
             }
-            
+
             .category-button {
                 border: 0px;
                 padding: 12px 8px;
@@ -828,7 +830,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _refresh_visible_page(self):
         # Prefer your internal state if it exists
         if self.current_page and self.current_group:
-            self.show_category_apps(self.current_page)
+            self.refresh_current_page(preserve_scroll=True)
             return
 
         # Fallback: if you have a sidebar listbox, use its selection
@@ -836,7 +838,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if row and hasattr(row, "category") and hasattr(row, "group"):
             self.current_page = row.category
             self.current_group = row.group
-            self.show_category_apps(self.current_page)
+            self.refresh_current_page(preserve_scroll=True)
             return
 
         # Last-resort: refresh the default you say is visible
@@ -1578,7 +1580,7 @@ class MainWindow(Gtk.ApplicationWindow):
             header_box.pack_start(group_header, False, False, 0)
 
             # Add the box to the container
-            
+
             if first_category_group == False:
                 first_category_group = True
             else:
@@ -1734,7 +1736,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     label.set_markup(safe_title+markup_selected)
                 label.get_style_context().add_class("active")
                 break
-        
+
         if self.updates_results == []:
             self.updates_available_bar.set_visible(False)
 
@@ -1748,17 +1750,34 @@ class MainWindow(Gtk.ApplicationWindow):
         self.show_category_apps(category)
 
 
-    def refresh_current_page(self):
-        """Refresh the currently displayed page"""
+    def refresh_current_page(self, preserve_scroll=True):
+        """Refresh the currently displayed page (optionally preserving scroll)."""
+        saved_scroll = 0.0
+        if preserve_scroll and hasattr(self, "category_scrolled_window") and self.category_scrolled_window:
+            vadj = self.category_scrolled_window.get_vadjustment()
+            saved_scroll = vadj.get_value()
+
+        # Close details window if open
+        if hasattr(self, "details_window") and self.details_window:
+            try:
+                self.details_window.destroy()
+            except Exception:
+                pass
+            self.details_window = None
+
+        # Re-render the current page WITHOUT re-triggering category click logic
         if self.current_page and self.current_group:
-            self.on_category_clicked(self.current_page, self.current_group)
-        try:
-            if self.details_window:
-                # box_outer = self.details_window.get_children(self.details_window.get_child())
-                # print(box_outer)
-                self.details_window.destroy() # Temporary solution for action buttons not updating on details window
-        except:
-            pass
+            self.show_category_apps(self.current_page, preserve_scroll=preserve_scroll)
+
+        if preserve_scroll:
+            def _restore():
+                vadj2 = self.category_scrolled_window.get_vadjustment()
+                upper = vadj2.get_upper() - vadj2.get_page_size()
+                vadj2.set_value(min(saved_scroll, max(0, upper)))
+                return False
+
+            GLib.idle_add(_restore)
+
 
     def update_category_header(self, category):
         """Update the category header text based on the selected category."""
@@ -2142,10 +2161,28 @@ class MainWindow(Gtk.ApplicationWindow):
         }
         return priorities.get(kind, 3)
 
-    def show_category_apps(self, category):
+    def show_category_apps(self, category, preserve_scroll=False):
         if self.current_group == "system" and category == "installed":
+            # Installed/Updates are local; don't block on metadata.
+            if category in ("installed", "updates"):
+                apps = []
+                if not preserve_scroll:
+                    vadjustment = self.category_scrolled_window.get_vadjustment()
+                    vadjustment.set_value(vadjustment.get_lower())
+
+                if category == "installed":
+                    apps.extend(list(self.installed_results or []))
+                else:
+                    apps.extend(list(self.updates_results or []))
+
+                if apps:
+                    apps.sort(key=lambda app: self.get_app_priority(app.get_details().get('kind')))
+                self.display_apps(apps)
+                return
+
+            # Everything else needs metadata
             if self.metadata_loading or not self.metadata_loaded:
-                self._show_loading_view("Loading installed apps…")
+                self._show_loading_view("Fetching Metadata… Please wait")
                 return
 
         collections_keys = self._collections_keys()  # <-- add this
@@ -2169,8 +2206,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Initialize apps list
         apps = []
-        vadjustment = self.category_scrolled_window.get_vadjustment()
-        vadjustment.set_value(vadjustment.get_lower())
+        if not preserve_scroll:
+            vadjustment = self.category_scrolled_window.get_vadjustment()
+            vadjustment.set_value(vadjustment.get_lower())
 
         # Load system data
         if category == "installed":
@@ -2396,7 +2434,7 @@ class MainWindow(Gtk.ApplicationWindow):
         nothing_icon.set_pixel_size(128)
 
         nothing_title = Gtk.Label(label="It's empty here...", halign=Gtk.Align.CENTER)
-        nothing_title.get_style_context().add_class('title-2')     
+        nothing_title.get_style_context().add_class('title-2')
 
         nothing_label = Gtk.Label(label="We couldn't find any applications corresponding to your demand.")
         nothing_label.set_halign(Gtk.Align.CENTER)
@@ -2446,7 +2484,14 @@ class MainWindow(Gtk.ApplicationWindow):
         content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         self._setup_icon(content_box, details)
         self._setup_text_layout(content_box, details, app_data['repos'])
-        self._setup_buttons(content_box, status, app)
+        row_state = {}
+        self._setup_buttons(content_box, status, app, row_state=row_state)
+        app_id = details.get("id")
+        if app_id:
+            row_state["app"] = app
+            row_state["content_box"] = content_box
+            row_state["row_container"] = container  # outer row container, useful for removing row
+            self.app_rows[app_id] = row_state
         content_box.get_style_context().add_class('app-list-item')
 
         event_box = Gtk.EventBox()
@@ -2467,12 +2512,55 @@ class MainWindow(Gtk.ApplicationWindow):
             if content.get_style_context().has_class("app-list-item") == True:
                 self.on_details_clicked(Gtk.Button, app)
 
+    def update_row_status(self, app_id: str):
+        row = self.app_rows.get(app_id)
+        if not row:
+            return
+
+        app = row.get("app")
+        if not app:
+            return
+
+        status = self._get_app_status(app)
+
+        # If we're on list pages like Installed/Updates, the row may need to disappear.
+        if self.current_group == "system" and self.current_page == "installed" and not status["is_installed"]:
+            try:
+                row["row_container"].destroy()
+            except Exception:
+                pass
+            self.app_rows.pop(app_id, None)
+            return
+
+        if self.current_group == "system" and self.current_page == "updates" and not status["is_updatable"]:
+            try:
+                row["row_container"].destroy()
+            except Exception:
+                pass
+            self.app_rows.pop(app_id, None)
+            return
+
+        # Rebuild buttons in-place (simplest + robust)
+        old_box = row.get("buttons_box")
+        if old_box:
+            try:
+                old_box.destroy()
+            except Exception:
+                pass
+
+        # Recreate buttons with current status
+        self._setup_buttons(row["content_box"], status, app, row_state=row)
+
+        # Make sure GTK relayout happens
+        row["content_box"].show_all()
+
     def _get_app_status(self, app):
         """Determine installation and update status of an application."""
         details = app.get_details()
+        app_id = details.get('id')
         return {
-            'is_installed': any(pkg.id == details['id'] for pkg in self.installed_results),
-            'is_updatable': any(pkg.id == details['id'] for pkg in self.updates_results),
+            'is_installed': bool(app_id) and any(pkg.id == app_id for pkg in self.installed_results),
+            'is_updatable': bool(app_id) and any(pkg.id == app_id for pkg in self.updates_results),
             'has_donation_url': bool(app.get_details().get('urls', {}).get('donation'))
         }
 
@@ -2491,8 +2579,11 @@ class MainWindow(Gtk.ApplicationWindow):
             is_themed=True
         )
 
-        if details['icon_filename']:
-            icon_path = Path(f"{details['icon_path_128']}/{details['icon_filename']}")
+        icon_filename = details.get('icon_filename')
+        icon_path_128 = details.get('icon_path_128')
+
+        if icon_filename and icon_path_128:
+            icon_path = Path(f"{icon_path_128}/{icon_filename}")
             if icon_path.exists():
                 icon_widget = self.create_scaled_icon(str(icon_path), is_themed=False)
 
@@ -2506,15 +2597,20 @@ class MainWindow(Gtk.ApplicationWindow):
         right_box.set_spacing(4)
         right_box.set_hexpand(True)
 
+        name = details.get('name') or details.get('id') or "Unknown"
+        developer = details.get('developer') or ""
+        summary = details.get('summary') or ""
+        kind = details.get('kind') or "UNKNOWN"
+
         # Title
-        title_label = Gtk.Label(label=details['name'])
+        title_label = Gtk.Label(label=name)
         title_label.get_style_context().add_class("app-list-header")
         title_label.set_halign(Gtk.Align.START)
         title_label.set_hexpand(True)
         right_box.pack_start(title_label, False, False, 0)
 
         #Developer
-        developer_label = Gtk.Label(label=f"{details['developer']}")
+        developer_label = Gtk.Label(label=f"{developer}")
         developer_label.set_halign(Gtk.Align.START)
         developer_label.set_hexpand(True)
         developer_label.set_line_wrap(True)
@@ -2524,7 +2620,7 @@ class MainWindow(Gtk.ApplicationWindow):
         right_box.pack_start(developer_label, False, False, 0)
 
         # Description
-        desc_label = Gtk.Label(label=details['summary'])
+        desc_label = Gtk.Label(label=summary)
         desc_label.set_halign(Gtk.Align.START)
         desc_label.set_yalign(1)
         desc_label.set_hexpand(True)
@@ -2553,7 +2649,7 @@ class MainWindow(Gtk.ApplicationWindow):
         repo_box.get_style_context().add_class("dim-label")
         repo_box.get_style_context().add_class("app-list-misc")
 
-        repo_list_label = Gtk.Label(label=f"Type: {details['kind']} • Sources:")
+        repo_list_label = Gtk.Label(label=f"Type: {kind} • Sources:")
         repo_box.pack_start(repo_list_label, False, False, 0)
 
         for repo in sorted(repos):
@@ -2565,17 +2661,20 @@ class MainWindow(Gtk.ApplicationWindow):
 
         container.pack_start(right_box, True, True, 0)
 
-    def _setup_buttons(self, container, status, app, panel=None):
+    def _setup_buttons(self, container, status, app, panel=None, row_state=None):
         """Set up action buttons for the application."""
         buttons_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         buttons_box.set_spacing(8)
         buttons_box.set_halign(Gtk.Align.END)
         buttons_box.set_valign(Gtk.Align.CENTER)  # Center vertically
+        if row_state is not None:
+            row_state["buttons_box"] = buttons_box
+            row_state["buttons"] = {}
         update_button = False
 
         # Add install/remove buttons separately
         if status['is_updatable'] and self.current_page != "installed":
-            self._add_action_button(
+            btn = self._add_action_button(
                 buttons_box,
                 True,
                 app,
@@ -2584,10 +2683,12 @@ class MainWindow(Gtk.ApplicationWindow):
                 None,
                 "Update"
             )
+            if row_state is not None:
+                row_state["buttons"]["update"] = btn
             update_button = True
-        
+
         elif status['is_installed']:
-            self._add_action_button(
+            btn = self._add_action_button(
                 buttons_box,
                 True,
                 app,
@@ -2596,9 +2697,10 @@ class MainWindow(Gtk.ApplicationWindow):
                 None,
                 "Uninstall"
             )
-            
+            if row_state is not None:
+                row_state["buttons"]["uninstall"] = btn
         else:
-            self._add_action_button(
+            btn = self._add_action_button(
                 buttons_box,
                 True,
                 app,
@@ -2607,18 +2709,21 @@ class MainWindow(Gtk.ApplicationWindow):
                 None,
                 "Install",
                 True
-            )     
+            )
+            if row_state is not None:
+                row_state["buttons"]["install"] = btn
 
         if status['is_installed']:
-            self._add_action_button(
+            btn = self._add_action_button(
                 buttons_box,
                 True,
                 app,
                 self.on_app_options_clicked,
                 "applications-system-symbolic",
                 "Manage permissions"
-            )   
-        
+            )
+            if row_state is not None:
+                row_state["buttons"]["gear"] = btn
         # if panel != "info":
         #     self._add_action_button(
         #         buttons_box,
@@ -2631,7 +2736,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         if status['has_donation_url']:
             if panel == "info":
-                self._add_action_button(
+                btn = self._add_action_button(
                     buttons_box,
                     True,
                     app,
@@ -2640,8 +2745,10 @@ class MainWindow(Gtk.ApplicationWindow):
                     None,
                     "Donate"
                 )
+                if row_state is not None:
+                    row_state["buttons"]["donate"] = btn
             else:
-                self._add_action_button(
+                btn = self._add_action_button(
                     buttons_box,
                     True,
                     app,
@@ -2649,9 +2756,11 @@ class MainWindow(Gtk.ApplicationWindow):
                     'emote-love-symbolic',
                     "Donate"
                 )
-    
+                if row_state is not None:
+                    row_state["buttons"]["donate"] = btn
+
         if status['is_updatable'] and update_button != True:
-            self._add_action_button(
+            btn = self._add_action_button(
                 buttons_box,
                 True,
                 app,
@@ -2659,6 +2768,9 @@ class MainWindow(Gtk.ApplicationWindow):
                 'software-update-available-symbolic',
                 "Update"
             )
+            if row_state is not None:
+                row_state["buttons"]["update"] = btn
+
 
         container.pack_end(buttons_box, False, False, 0)
 
@@ -2669,23 +2781,25 @@ class MainWindow(Gtk.ApplicationWindow):
 
         button = self.create_button(callback, app)
         if button:
-            # Set consistent size
-            button.set_size_request(26, 26)  # 40x40 pixels
-
-            # Set consistent style
+            button.set_size_request(26, 26)
             button.get_style_context().add_class("app-action-button")
 
             icon = Gio.Icon.new_for_string(icon_name)
             button.set_image(Gtk.Image.new_from_gicon(icon, Gtk.IconSize.BUTTON))
             parent.pack_end(button, False, False, 0)
             button.set_always_show_image(True)
+
             if tooltip:
                 button.set_tooltip_text(tooltip)
             if label_name:
-                button.set_label("  "+label_name)
+                button.set_label("  " + label_name)
                 button.get_style_context().add_class("icon_label")
             if accent is True:
                 button.get_style_context().add_class("suggested-action")
+
+            return button
+
+        return None
 
     def show_waiting_dialog(self, message="Please wait while task is running..."):
         """Show a modal dialog with a spinner"""
@@ -2797,6 +2911,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _perform_installation(self, dialog, app, button):
         """Handle the installation process"""
+
         selected_repo = None
         if button:
             selected_repo = self.repo_combo.get_active_text()
@@ -2805,15 +2920,17 @@ class MainWindow(Gtk.ApplicationWindow):
             GLib.idle_add(self.show_waiting_dialog)
             if button:
                 success, message = fp_turbo.install_flatpak(app, selected_repo, self.system_mode)
+                aid = app.get_details().get("id")
             else:
                 success, message = fp_turbo.install_flatpakref(app, self.system_mode)
-            GLib.idle_add(lambda: self.on_task_complete(success, message))
+                aid = str(app)
 
+            GLib.idle_add(lambda: self.on_task_complete(success, message, aid))
         thread = threading.Thread(target=installation_thread)
         thread.daemon = True
         thread.start()
 
-    def on_task_complete(self, success, message):
+    def on_task_complete(self, success, message, app_id=None):
         """Handle task completion"""
         message_type = Gtk.MessageType.INFO
         if not success:
@@ -2830,7 +2947,19 @@ class MainWindow(Gtk.ApplicationWindow):
             finished_dialog.run()
             finished_dialog.destroy()
         self.refresh_local()
-        self.refresh_current_page()
+
+        # Option B: update just the affected row (no full refresh) when possible
+        if self.enable_row_updates and app_id and app_id in self.app_rows:
+            # On Installed/Updates pages, row membership changes a lot; safe fallback is Option A refresh.
+            if self.current_group == "system" and self.current_page in ("installed", "updates"):
+                self.refresh_current_page(preserve_scroll=True)
+            else:
+                self.update_row_status(app_id)
+                # If updates badge/bar depends on updates_results, update it too:
+                self.update_updates_available_bar(self.current_page)
+        else:
+            # Fallback: Option A refresh (preserves scroll now)
+            self.refresh_current_page(preserve_scroll=True)
         if hasattr(self, "waiting_dialog") and self.waiting_dialog:
             try:
                 self.waiting_dialog.destroy()
@@ -2875,8 +3004,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 success, message = fp_turbo.remove_flatpak(app, self.system_mode)
 
                 # Update UI on main thread
-                GLib.idle_add(lambda: self.on_task_complete(success, message))
-
+                aid = app.get_details().get("id")
+                GLib.idle_add(lambda: self.on_task_complete(success, message, aid))
             # Start spinner and begin installation
             thread = threading.Thread(target=perform_removal)
             thread.daemon = True  # Allow program to exit even if thread is still running
@@ -4060,7 +4189,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 add_rm_icon = "list-remove-symbolic"
                 use_icon = Gio.Icon.new_for_string(add_rm_icon)
                 btn.set_image(Gtk.Image.new_from_gicon(use_icon, Gtk.IconSize.BUTTON))
-                btn.connect("clicked", self._on_global_remove_path, path, perm_type)
+                btn.connect("clicked", self._global_on_remove_path, path, perm_type)
                 btn_box.pack_end(btn, False, False, 0)
 
                 hbox.pack_end(btn_box, False, False, 0)
@@ -4662,8 +4791,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 success, message = fp_turbo.update_flatpak(app, self.system_mode)
 
                 # Update UI on main thread
-                GLib.idle_add(lambda: self.on_task_complete(success, message))
-
+                aid = app.get_details().get("id")
+                GLib.idle_add(lambda: self.on_task_complete(success, message, aid))
             # Start spinner and begin installation
             thread = threading.Thread(target=perform_update)
             thread.daemon = True  # Allow program to exit even if thread is still running
@@ -4755,26 +4884,26 @@ class MainWindow(Gtk.ApplicationWindow):
                 # Create new EventBox for each dot
                 event_box = Gtk.EventBox(valign=Gtk.Align.CENTER)
                 event_box.set_border_width(0)
-    
+
                 # Create bullet using Label
                 bullet = Gtk.Label(label="⬤", justify=Gtk.Justification.CENTER, yalign=0.58)
                 bullet.get_style_context().add_class("details-gallery-bullet")
                 if i == self.index_current:
                     bullet.get_style_context().add_class("active")  # First dot is active
-    
+
                 # Add bullet to event box
                 event_box.add(bullet)
-    
+
                 # Connect navigation
                 event_box.connect('button-release-event',
                                 lambda w, e, idx=i: self._switch_screenshot(
                                     current_image, screenshots, dots, idx, app_id, nav_previous_icon, nav_next_icon))
                 event_box.connect("enter-notify-event", lambda w, e, idx=i: self.enter_hover_event(bullet, idx, dots));
                 event_box.connect("leave-notify-event", lambda w, e, idx=i: self.leave_hover_event(bullet, idx, dots));
-    
+
                 # Add event box to nav box
                 nav_box.pack_start(event_box, False, True, 0)
-    
+
                 # Store the event box
                 dots.append(event_box)
 
@@ -4842,7 +4971,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 bullet.get_style_context().add_class("active")
             else:
                 bullet.get_style_context().remove_class("active")
-            
+
         if self.screenshot_loop == False:
             if self.index_current == 0:
                 icon_previous.get_style_context().add_class("dim-label")
@@ -5015,14 +5144,11 @@ class MainWindow(Gtk.ApplicationWindow):
             # Parse the HTML
             parser = TextExtractor()
             parser.text.append('\n') # For some reasons, description doesn't appear when there's only one line of paragraph, so I added this as a temporary fix.
-            print(text)
             parser.feed(text)
             parsed_text = ''.join(parser.text) # Use [:-1] to remove last line if it's /n
-            print(TextExtractor())
 
             # Add basic HTML styling
             buffer.set_text(parsed_text)
-            print(parsed_text)
             text_view.set_pixels_below_lines(3)
 
         except Exception as e:
@@ -5055,7 +5181,7 @@ class MainWindow(Gtk.ApplicationWindow):
         url_type_icon = Gtk.Image.new_from_gicon(Gio.Icon.new_for_string(url_type_icon_name), 3)
         url_type_icon.set_size_request(-1, 28)
         url_type_icon.set_valign(Gtk.Align.CENTER)
-        
+
         title_label = Gtk.Label(label=f"{url_type.capitalize()}", xalign=0)
         title_label.get_style_context().add_class("url-list-item-title")
 
@@ -5494,7 +5620,7 @@ def cleanup_xhost():
         )
     except Exception as e:
         logger.error(f"Failed to run xhost cleanup: {e}")
-        
+
 if __name__ == "__main__":
     try:
         # Your main application code here
