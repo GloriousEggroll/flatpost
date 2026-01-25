@@ -2801,6 +2801,61 @@ class MainWindow(Gtk.ApplicationWindow):
 
         return None
 
+    def show_install_progress_dialog(self, title="Installing…", subtitle="Please wait while task is running"):
+        if getattr(self, "waiting_dialog", None):
+            try:
+                self.waiting_dialog.destroy()
+            except Exception:
+                pass
+
+        dialog = Gtk.Dialog(
+            title=title,
+            transient_for=self,
+            modal=True,
+            destroy_with_parent=True
+        )
+        dialog.set_default_size(420, -1)
+
+        box = dialog.get_content_area()
+        box.set_spacing(10)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+
+        status_label = Gtk.Label(label=subtitle)
+        status_label.set_xalign(0)
+
+        pbar = Gtk.ProgressBar()
+        pbar.set_show_text(True)
+        pbar.set_fraction(0.0)
+        pbar.set_text("0%")
+
+        box.add(status_label)
+        box.add(pbar)
+        box.show_all()
+
+        self.waiting_dialog = dialog
+        self.install_status_label = status_label
+        self.install_progressbar = pbar
+
+        dialog.show()
+
+
+    def update_install_progress(self, pct: int, status: str = ""):
+        if not getattr(self, "install_progress_bar", None):
+            return False
+
+        frac = max(0.0, min(1.0, pct / 100.0))
+        self.install_progress_bar.set_fraction(frac)
+        self.install_progress_bar.set_text(f"{pct}%")
+
+        if getattr(self, "install_progress_label", None):
+            self.install_progress_label.set_text(status or "Installing…")
+
+        return False  # important for idle_add: don't repeat
+
+
     def show_waiting_dialog(self, message="Please wait while task is running..."):
         """Show a modal dialog with a spinner"""
         self.waiting_dialog = Gtk.Dialog(
@@ -2908,58 +2963,85 @@ class MainWindow(Gtk.ApplicationWindow):
             lbl.get_style_context().add_class("dim-label")
             content_area.pack_start(lbl, False, False, 0)
 
+    def show_install_progress_dialog(self, title="Please wait while task is running"):
+        self.waiting_dialog = Gtk.Dialog(
+            title=title,
+            transient_for=self,
+            modal=True,
+            destroy_with_parent=True,
+        )
+
+        content = self.waiting_dialog.get_content_area()
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_border_width(12)
+        content.add(box)  # GTK3
+
+        self.install_progress_label = Gtk.Label(label="Preparing…")
+        self.install_progress_label.set_xalign(0.0)
+
+        self.install_progress_bar = Gtk.ProgressBar()
+        self.install_progress_bar.set_show_text(True)
+        self.install_progress_bar.set_fraction(0.0)
+        self.install_progress_bar.set_text("0%")
+
+        box.pack_start(self.install_progress_label, False, False, 0)
+        box.pack_start(self.install_progress_bar, False, False, 0)
+
+        self.waiting_dialog.show_all()
 
     def _perform_installation(self, dialog, app, button):
-        """Handle the installation process"""
+        selected_repo = self.repo_combo.get_active_text() if button else None
 
-        selected_repo = None
-        if button:
-            selected_repo = self.repo_combo.get_active_text()
+        def progress_cb(pct, status):
+            GLib.idle_add(self.update_install_progress, pct, status)
 
         def installation_thread():
-            GLib.idle_add(self.show_waiting_dialog)
+            GLib.idle_add(self.show_install_progress_dialog)
+
             if button:
-                success, message = fp_turbo.install_flatpak(app, selected_repo, self.system_mode)
+                success, message = fp_turbo.install_flatpak(app, selected_repo, self.system_mode, progress_cb=progress_cb)
                 aid = app.get_details().get("id")
             else:
-                success, message = fp_turbo.install_flatpakref(app, self.system_mode)
+                success, message = fp_turbo.install_flatpakref(app, self.system_mode, progress_cb=progress_cb)
                 aid = str(app)
 
             GLib.idle_add(lambda: self.on_task_complete(success, message, aid))
-        thread = threading.Thread(target=installation_thread)
-        thread.daemon = True
+
+        thread = threading.Thread(target=installation_thread, daemon=True)
         thread.start()
+
 
     def on_task_complete(self, success, message, app_id=None):
         """Handle task completion"""
-        message_type = Gtk.MessageType.INFO
-        if not success:
-            message_type = Gtk.MessageType.ERROR
-        if message:
+
+        # Only show a popup if something failed (or if you want to show warnings)
+        if not success and message:
             finished_dialog = Gtk.MessageDialog(
                 transient_for=self,
                 modal=True,
                 destroy_with_parent=True,
-                message_type=message_type,
+                message_type=Gtk.MessageType.ERROR,
                 buttons=Gtk.ButtonsType.OK,
                 text=message
             )
             finished_dialog.run()
             finished_dialog.destroy()
+
+        # Always do the "OK actions" (refresh/update UI) regardless of success
         self.refresh_local()
 
         # Option B: update just the affected row (no full refresh) when possible
         if self.enable_row_updates and app_id and app_id in self.app_rows:
-            # On Installed/Updates pages, row membership changes a lot; safe fallback is Option A refresh.
             if self.current_group == "system" and self.current_page in ("installed", "updates"):
                 self.refresh_current_page(preserve_scroll=True)
             else:
                 self.update_row_status(app_id)
-                # If updates badge/bar depends on updates_results, update it too:
                 self.update_updates_available_bar(self.current_page)
         else:
-            # Fallback: Option A refresh (preserves scroll now)
             self.refresh_current_page(preserve_scroll=True)
+
+        # Close the waiting/progress dialog
         if hasattr(self, "waiting_dialog") and self.waiting_dialog:
             try:
                 self.waiting_dialog.destroy()

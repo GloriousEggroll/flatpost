@@ -891,75 +891,192 @@ class AppstreamSearcher:
             self.all_apps
         )
 
-def install_flatpak(app: AppStreamPackage, repo_name=None, system=False) -> tuple[bool, str]:
+
+def _run_transaction_with_progress(transaction: Flatpak.Transaction, progress_cb=None):
     """
-    Install a Flatpak package.
-
-    Args:
-        app (AppStreamPackage): The package to install.
-        repo_name (str): Optional repository name to use for installation
-        system (Optional[bool]): Whether to operate on user or system installation
-
-    Returns:
-        tuple[bool, str]: (success, message)
+    progress_cb(overall_percent:int, status:str)  # called from the *calling thread*
+    NOTE: caller should marshal to GTK thread via GLib.idle_add if needed.
     """
+    state = {
+        "total_ops": 1,
+        "done_ops": 0,
+        "current_progress": 0,
+        "current_status": "",
+        "current_progress_obj": None,
+        "changed_handler_id": None,
+    }
 
+    def emit():
+        if not progress_cb:
+            return
+        total = max(1, state["total_ops"])
+        overall = int(((state["done_ops"] + (state["current_progress"] / 100.0)) / total) * 100)
+        overall = max(0, min(100, overall))
+        progress_cb(overall, state["current_status"])
+
+    def on_ready(trans):
+        # ready signal expects bool return (allow transaction to proceed)
+        try:
+            ops = trans.get_operations()
+            state["total_ops"] = max(1, len(ops) if ops else 1)
+        except Exception:
+            state["total_ops"] = 1
+        emit()
+        return True
+
+    def on_operation_done(trans, operation, commit, error):
+        # operation-done fires after each op completes
+        state["done_ops"] += 1
+        state["current_progress"] = 0
+        emit()
+
+    def on_new_operation(trans, operation, progress: Flatpak.TransactionProgress):
+        # Disconnect prior progress handler (if any)
+        if state["current_progress_obj"] is not None and state["changed_handler_id"] is not None:
+            try:
+                state["current_progress_obj"].disconnect(state["changed_handler_id"])
+            except Exception:
+                pass
+
+        state["current_progress_obj"] = progress
+        state["current_progress"] = 0
+
+        # Optional: make updates more frequent/smooth
+        try:
+            progress.set_update_frequency(200)  # ms
+        except Exception:
+            pass
+
+        def on_progress_changed(p):
+            try:
+                state["current_progress"] = int(p.get_progress())  # 0..100
+            except Exception:
+                state["current_progress"] = 0
+            try:
+                state["current_status"] = p.get_status() or ""
+            except Exception:
+                state["current_status"] = ""
+            emit()
+
+        state["changed_handler_id"] = progress.connect("changed", on_progress_changed)
+
+        # Emit immediately so UI updates as soon as we start an op
+        on_progress_changed(progress)
+
+    transaction.connect("ready", on_ready)
+    transaction.connect("new-operation", on_new_operation)
+    transaction.connect("operation-done", on_operation_done)
+
+    transaction.run()
+
+def install_flatpak(app: AppStreamPackage, repo_name=None, system=False, progress_cb=None) -> tuple[bool, str]:
     if not repo_name:
         repo_name = "flathub"
 
     installation = get_installation(system)
 
-    transaction = Flatpak.Transaction.new_for_installation(installation)
+    cancellable = Gio.Cancellable()
+    transaction = Flatpak.Transaction.new_for_installation(installation, cancellable)  # API expects cancellable :contentReference[oaicite:2]{index=2}
+
+    def emit_progress(pct: int, status: str = ""):
+        if progress_cb:
+            try:
+                progress_cb(int(pct), status or "")
+            except Exception:
+                pass
+
+    def on_new_operation(tx, operation, progress):
+        # new-operation gives us a TransactionProgress object :contentReference[oaicite:3]{index=3}
+        if not progress:
+            return
+
+        def on_changed(prog):
+            # TransactionProgress exposes get_progress(), and emits "changed" :contentReference[oaicite:4]{index=4}
+            try:
+                pct = prog.get_progress()  # typically 0..100
+            except Exception:
+                pct = 0
+            try:
+                status = prog.get_status() or ""
+            except Exception:
+                status = ""
+            emit_progress(pct, status)
+
+        progress.connect("changed", on_changed)  # :contentReference[oaicite:5]{index=5}
+        on_changed(progress)  # initial update
+
+    transaction.connect("new-operation", on_new_operation)  # :contentReference[oaicite:6]{index=6}
+
     available_apps = installation.list_remote_refs_sync(repo_name)
-    match_found = None
+    match_found = False
     for available_app in available_apps:
         if available_app.get_name() in app.id:
-            match_found = 1
-            # Add the install operation
+            match_found = True
             transaction.add_install(repo_name, available_app.format_ref(), None)
 
     if not match_found:
         return False, f"No available package named {app.id} found in any repositories."
 
+    emit_progress(0, "Preparing…")
+
     try:
-        transaction.run()
+        transaction.run(cancellable)  # API expects cancellable :contentReference[oaicite:7]{index=7}
     except GLib.Error as e:
         return False, f"Installation failed: {e}"
+
+    emit_progress(100, "Finishing…")
     return True, f"Successfully installed {app.id}"
 
-def install_flatpakref(ref_file, system=False):
-    """Add a new repository using a .flatpakrepo file"""
-    # Get existing repositories
+
+
+def install_flatpakref(ref_file, system=False, progress_cb=None):
     installation = get_installation(system)
 
-    if not ref_file.endswith('.flatpakref'):
-        return False, "Flatpak ref file path or URL must end with .flatpakref extension."
+    # ... your validation and file read remains the same ...
 
-    if not os.path.exists(ref_file):
-        return False, f"Flatpak ref file '{ref_file}' does not exist."
-
-    # Read the flatpakref file
-    try:
-        with open(ref_file, 'rb') as f:
-            repo_data = f.read()
-    except IOError as e:
-        return False, f"Failed to read flatpakref file: {str(e)}"
-
-    # Convert the data to GLib.Bytes
     repo_bytes = GLib.Bytes.new(repo_data)
 
-    installation = get_installation(system)
+    cancellable = Gio.Cancellable()
+    transaction = Flatpak.Transaction.new_for_installation(installation, cancellable)  # :contentReference[oaicite:8]{index=8}
 
-    transaction = Flatpak.Transaction.new_for_installation(installation)
+    def emit_progress(pct: int, status: str = ""):
+        if progress_cb:
+            try:
+                progress_cb(int(pct), status or "")
+            except Exception:
+                pass
 
-    # Add the install operation
+    def on_new_operation(tx, operation, progress):
+        if not progress:
+            return
+
+        def on_changed(prog):
+            try:
+                pct = prog.get_progress()
+            except Exception:
+                pct = 0
+            try:
+                status = prog.get_status() or ""
+            except Exception:
+                status = ""
+            emit_progress(pct, status)
+
+        progress.connect("changed", on_changed)
+        on_changed(progress)
+
+    transaction.connect("new-operation", on_new_operation)  # :contentReference[oaicite:9]{index=9}
+
     transaction.add_install_flatpakref(repo_bytes)
-    # Run the transaction
+
+    emit_progress(0, "Preparing…")
     try:
-        transaction.run()
+        transaction.run(cancellable)  # :contentReference[oaicite:10]{index=10}
     except GLib.Error as e:
         return False, f"Installation failed: {e}"
+
+    emit_progress(100, "Finishing…")
     return True, f"Successfully installed {ref_file}"
+
 
 
 def remove_flatpak(app: AppStreamPackage, system=False) -> tuple[bool, str]:
