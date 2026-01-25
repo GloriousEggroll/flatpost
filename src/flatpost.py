@@ -610,7 +610,14 @@ class MainWindow(Gtk.ApplicationWindow):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 600
         )
 
-        self.refresh_data()
+        # Metadata fetch state
+        self.metadata_loading = False
+        self.metadata_loaded = False
+        self.metadata_error = None
+        self._metadata_fetch_seq = 0
+
+        # Start background fetch immediately (no blocking dialog)
+        self.start_metadata_refresh(show_error_dialog=False)
 
         # Create main layout
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -625,6 +632,168 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Select Trending by default
         self.select_default_category()
+
+    def _collections_keys(self):
+        return set(self.category_groups.get('collections', {}).keys())
+
+    def _show_loading_view(self, message="Fetching Metadata… Please wait"):
+        """Replace right panel content with a centered spinner + message."""
+        self._clear_container()
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.set_hexpand(True)
+        outer.set_vexpand(True)
+
+        center = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        center.set_halign(Gtk.Align.CENTER)
+        center.set_valign(Gtk.Align.CENTER)
+        center.set_hexpand(True)
+        center.set_vexpand(True)
+
+        spinner = Gtk.Spinner()
+        spinner.set_size_request(32, 32)
+        spinner.start()
+
+        title = Gtk.Label(label=message)
+        title.get_style_context().add_class("title-2")
+        title.set_halign(Gtk.Align.CENTER)
+
+        subtitle = Gtk.Label(label="This may take a moment.")
+        subtitle.get_style_context().add_class("dim-label")
+        subtitle.set_halign(Gtk.Align.CENTER)
+
+        center.pack_start(spinner, False, False, 0)
+        center.pack_start(title, False, False, 0)
+        center.pack_start(subtitle, False, False, 0)
+
+        outer.pack_start(center, True, True, 0)
+        self.right_container.pack_start(outer, True, True, 0)
+        self.right_container.show_all()
+
+    def _show_loading_error_view(self, message):
+        """Show an in-page error (instead of a startup blocking dialog)."""
+        self._clear_container()
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.set_hexpand(True)
+        outer.set_vexpand(True)
+
+        center = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        center.set_halign(Gtk.Align.CENTER)
+        center.set_valign(Gtk.Align.CENTER)
+        center.set_hexpand(True)
+        center.set_vexpand(True)
+
+        icon = Gtk.Image.new_from_gicon(Gio.Icon.new_for_string("dialog-error-symbolic"), 6)
+        icon.set_pixel_size(64)
+
+        title = Gtk.Label(label="Metadata fetch failed")
+        title.get_style_context().add_class("title-2")
+        title.set_halign(Gtk.Align.CENTER)
+
+        body = Gtk.Label(label=message)
+        body.get_style_context().add_class("dim-label")
+        body.set_halign(Gtk.Align.CENTER)
+        body.set_line_wrap(True)
+        body.set_max_width_chars(60)
+
+        retry = Gtk.Button(label="Retry")
+        retry.get_style_context().add_class("suggested-action")
+        retry.connect("clicked", lambda *_: self.start_metadata_refresh(show_error_dialog=False))
+
+        center.pack_start(icon, False, False, 0)
+        center.pack_start(title, False, False, 0)
+        center.pack_start(body, False, False, 0)
+        center.pack_start(retry, False, False, 0)
+
+        outer.pack_start(center, True, True, 0)
+        self.right_container.pack_start(outer, True, True, 0)
+        self.right_container.show_all()
+
+    def start_metadata_refresh(self, show_error_dialog=False):
+        """
+        Start metadata fetch in the background.
+        When it finishes, refresh the current page ONLY if the user is still on a collections page.
+        """
+        # Prevent duplicate refresh threads
+        if getattr(self, "metadata_loading", False):
+            return
+
+        self.metadata_loading = True
+        self.metadata_loaded = False
+        self.metadata_error = None
+
+        # Sequence number prevents stale threads from overwriting newer results
+        self._metadata_fetch_seq = getattr(self, "_metadata_fetch_seq", 0) + 1
+        seq = self._metadata_fetch_seq
+
+        searcher = fp_turbo.get_reposearcher(self.system_mode)
+        collections_keys = self._collections_keys()
+
+        def worker():
+            try:
+                category_results, collection_results, installed_results, updates_results, all_apps = \
+                    searcher.retrieve_metadata(self.system_mode)
+
+                def apply_results():
+                    # Ignore if another refresh started after this one
+                    if seq != getattr(self, "_metadata_fetch_seq", seq):
+                        return False
+
+                    self.category_results = category_results
+                    self.collection_results = collection_results
+                    self.installed_results = installed_results
+                    self.updates_results = updates_results
+                    self.all_apps = all_apps
+
+                    self.metadata_loading = False
+                    self.metadata_loaded = True
+                    self.metadata_error = None
+
+                    # Refresh only if user is still on a collections page
+                    if self.current_group == "collections" and self.current_page in collections_keys:
+                        self.refresh_current_page()
+
+                    return False
+
+                GLib.idle_add(apply_results)
+
+            except Exception as e:
+                err_text = str(e)
+
+                def apply_error():
+                    if seq != getattr(self, "_metadata_fetch_seq", seq):
+                        return False
+
+                    self.metadata_loading = False
+                    self.metadata_loaded = False
+                    self.metadata_error = err_text
+
+                    # Show in-page error if user is on a collections page
+                    if self.current_group == "collections" and self.current_page in collections_keys:
+                        self._show_loading_error_view(err_text)
+
+                    # Optional error dialog (not for startup)
+                    if show_error_dialog:
+                        dlg = Gtk.MessageDialog(
+                            transient_for=self,
+                            modal=True,
+                            destroy_with_parent=True,
+                            message_type=Gtk.MessageType.ERROR,
+                            buttons=Gtk.ButtonsType.OK,
+                            text="Error retrieving metadata",
+                            secondary_text=err_text
+                        )
+                        dlg.run()
+                        dlg.destroy()
+
+                    return False
+
+                GLib.idle_add(apply_error)
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+
 
     def on_drag_data_received(self, widget, context, x, y, data, info, time):
         """Handle drag and drop events"""
@@ -881,8 +1050,11 @@ class MainWindow(Gtk.ApplicationWindow):
         about_dialog.destroy()
 
     def on_refresh_metadata_button_clicked(self, button):
-        self.refresh_data()
-        self.refresh_current_page()
+        self.start_metadata_refresh(show_error_dialog=True)
+
+        if self.current_group == "collections" and self.current_page in self._collections_keys():
+            self._show_loading_view("Fetching Metadata… Please wait")
+
 
     def on_component_type_changed(self, combo):
         """Handle component type filter changes"""
@@ -1743,6 +1915,21 @@ class MainWindow(Gtk.ApplicationWindow):
         return priorities.get(kind, 3)
 
     def show_category_apps(self, category):
+        collections_keys = self._collections_keys()  # <-- add this
+
+        if category in collections_keys:
+            if getattr(self, "metadata_loading", False):
+                self._show_loading_view("Fetching Metadata… Please wait")
+                return
+            if not getattr(self, "metadata_loaded", False):
+                err = getattr(self, "metadata_error", None)
+                if err:
+                    self._show_loading_error_view(err)
+                else:
+                    self._show_loading_view("Fetching Metadata… Please wait")
+                    self.start_metadata_refresh(show_error_dialog=False)
+                return
+
         # Initialize apps list
         apps = []
         vadjustment = self.category_scrolled_window.get_vadjustment()

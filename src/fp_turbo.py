@@ -445,15 +445,15 @@ class AppstreamSearcher:
 
         for package in packages:
             # Try matching exact ID first
-            if keyword is package.id:
+            if keyword == package.id:
                 found = package
                 break
             # Next try matching exact name
-            elif keyword.lower() is package.name.lower():
+            elif keyword.lower() == package.name.lower():
                 found = package
                 break
             # Try matching case insensitive ID next
-            elif keyword.lower() is package.id.lower():
+            elif keyword.lower() == package.id.lower():
                 found = package
                 break
             # General keyword search
@@ -697,12 +697,17 @@ class AppstreamSearcher:
         self._initialize_metadata()
 
         if not check_internet():
-            return self._handle_offline_mode()
+            return self._handle_offline_mode(system)
 
+        # Refresh AppStream + reload remotes
         searcher = get_reposearcher(system, True)
-        self.all_apps = searcher.get_all_apps()
 
+        # IMPORTANT: ensure self.search_flatpak uses refreshed metadata
+        self.remotes = searcher.remotes
+
+        self.all_apps = searcher.get_all_apps()
         return self._process_categories(searcher, system)
+
 
     def _initialize_metadata(self):
         """Initialize empty lists for metadata storage."""
@@ -712,13 +717,12 @@ class AppstreamSearcher:
         self.updates_results = []
         self.all_apps = []
 
-    def _handle_offline_mode(self):
+    def _handle_offline_mode(self, system=False):
         """Handle metadata retrieval when offline."""
-
+        searcher = get_reposearcher(system)
         total_categories = sum(len(categories) for categories in self.category_groups.values())
         current_category = 0
-        # Search for each app in local repositories
-        searcher = get_reposearcher()
+
         search_result = []
         for group_name, categories in self.category_groups.items():
             # Process categories one at a time to keep GUI responsive
@@ -1045,11 +1049,10 @@ def get_reposearcher(system=False, refresh=False):
     return searcher
 
 def check_internet():
-    """Check if internet connection is available."""
     try:
         requests.head('https://flathub.org', timeout=3)
         return True
-    except requests.ConnectionError:
+    except requests.RequestException:
         return False
 
 def repotoggle(repo, toggle=True, system=False):
