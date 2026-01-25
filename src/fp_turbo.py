@@ -172,13 +172,23 @@ class AppStreamPackage:
         return None
 
     @property
-    def kind(self):
-        kind = self.component.get_kind()
-        kind_str = str(kind)
+    def kind(self) -> str:
+        k = self.component.get_kind()
 
-        for member in AppStreamComponentKind:
-            if member.name in kind_str:
-                return member.name
+        # GI may return an int-like enum or a plain int; normalize to int
+        try:
+            k_val = int(k)
+        except Exception:
+            # Fallback: try to parse a symbolic name from the string repr
+            s = str(k)
+            token = s.rsplit(".", 1)[-1].strip()
+            return token if token else "UNKNOWN"
+
+        # Map using your IntEnum (values match AppStream's)
+        try:
+            return AppStreamComponentKind(k_val).name.replace("_", " ").title()
+        except ValueError:
+            return "UNKNOWN"
 
     def _get_icon_url(self) -> str:
         """Get the remote icon URL from the component"""
