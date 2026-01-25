@@ -18,7 +18,16 @@ import requests
 import os
 import pwd
 import atexit
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import logging
+import time
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
+
+logger = logging.getLogger(__name__)
 
 APP_ID = "com.flatpost.flatpostapp"
 ICON_NAME = APP_ID
@@ -26,6 +35,168 @@ ICON_NAME = APP_ID
 settings = Gtk.Settings.get_default()
 settings.set_property("gtk-theme-name", "adw-gtk3-dark")  # Replace with the exact theme name if different
 settings.set_property("gtk-application-prefer-dark-theme", True)
+
+# ---- metadata TTL + stamp helpers ----
+METADATA_TTL_DAYS = 7
+
+def _metadata_cache_dir():
+    d = os.path.join(GLib.get_user_cache_dir(), "flatpak-turbo")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def _metadata_stamp_path(system_mode: bool):
+    mode = "system" if system_mode else "user"
+    return os.path.join(_metadata_cache_dir(), f"metadata_refresh_{mode}.stamp")
+
+def mark_metadata_refreshed(system_mode: bool):
+    path = _metadata_stamp_path(system_mode)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(datetime.now(timezone.utc).isoformat())
+
+def should_refresh_metadata(system_mode: bool, ttl_days: int = METADATA_TTL_DAYS) -> bool:
+    path = _metadata_stamp_path(system_mode)
+    if not os.path.exists(path):
+        return True
+
+    # Prefer reading the timestamp; fallback to file mtime
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            s = f.read().strip()
+        last = datetime.fromisoformat(s)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+    except Exception:
+        last = datetime.fromtimestamp(os.path.getmtime(path), tz=timezone.utc)
+
+    return (datetime.now(timezone.utc) - last) > timedelta(days=ttl_days)
+
+def retrieve_metadata_compat(searcher, system_mode: bool, need_refresh: bool):
+    """
+    Works with both older and newer fp_turbo/AppstreamSearcher APIs.
+    - Newer: retrieve_metadata(..., refresh=bool)
+    - Older: retrieve_metadata(...) (no refresh kw)
+    """
+    # 1) Try the newer API first
+    try:
+        return searcher.retrieve_metadata(system_mode, refresh=need_refresh), need_refresh
+    except TypeError as e:
+        msg = str(e)
+        if "unexpected keyword argument" not in msg or "refresh" not in msg:
+            raise  # some other TypeError, don't hide it
+
+    # 2) Older API: no refresh kw.
+    # If you wanted a "force refresh", attempt to call a refresh method if the object has one.
+    did_refresh = False
+    if need_refresh:
+        for meth_name in ("refresh_metadata", "refresh_remote", "refresh"):
+            meth = getattr(searcher, meth_name, None)
+            if callable(meth):
+                try:
+                    meth(system_mode)
+                except TypeError:
+                    # some variants might be meth() with no args
+                    meth()
+                did_refresh = True
+                break
+
+    # 3) Finally retrieve using the old signature
+    return searcher.retrieve_metadata(system_mode), did_refresh
+
+
+# ---- metadata cache (fast startup) ----
+
+def _metadata_cache_path(system_mode: bool):
+    mode = "system" if system_mode else "user"
+    d = os.path.join(GLib.get_user_cache_dir(), "flatpost")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"metadata_cache_{mode}.json")
+
+class CachedApp:
+    """
+    Minimal proxy for UI rendering from cached JSON.
+    Implements get_details() and .id for your status checks.
+    """
+    is_cached = True
+
+    def __init__(self, details: dict):
+        self._details = details or {}
+        self.id = self._details.get("id")  # used by your installed/updates checks
+
+    def get_details(self):
+        return self._details
+
+class MetadataCache:
+    SCHEMA_VERSION = 1
+
+    def __init__(self, system_mode: bool):
+        self.system_mode = system_mode
+        self.path = _metadata_cache_path(system_mode)
+
+    def _serialize_app(self, app):
+        # Take only primitives from get_details()
+        d = app.get_details() or {}
+
+        # IMPORTANT: screenshots in fp_turbo are often objects -> not JSON-safe.
+        # We omit them from cache (details view will resolve real app later).
+        screenshots = []
+        # If screenshots are already strings/urls, keep them; otherwise drop.
+        for s in (d.get("screenshots") or []):
+            if isinstance(s, (str, int, float, bool)) or s is None:
+                screenshots.append(s)
+
+        return {
+            "id": d.get("id"),
+            "name": d.get("name"),
+            "summary": d.get("summary"),
+            "description": d.get("description"),
+            "developer": d.get("developer"),
+            "version": d.get("version"),
+            "kind": d.get("kind"),
+            "categories": d.get("categories") or [],
+            "repo": d.get("repo"),
+            "icon_filename": d.get("icon_filename"),
+            "icon_path_128": d.get("icon_path_128"),
+            "urls": d.get("urls") or {},
+            "screenshots": screenshots,
+        }
+
+    def save(self, category_results, collection_results, installed_results, updates_results, all_apps):
+        payload = {
+            "schema_version": self.SCHEMA_VERSION,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "category_results": [self._serialize_app(a) for a in (category_results or [])],
+            "collection_results": [self._serialize_app(a) for a in (collection_results or [])],
+            "installed_results": [self._serialize_app(a) for a in (installed_results or [])],
+            "updates_results": [self._serialize_app(a) for a in (updates_results or [])],
+            "all_apps": [self._serialize_app(a) for a in (all_apps or [])],
+        }
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, self.path)
+
+    def load(self):
+        if not os.path.exists(self.path):
+            return None
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if payload.get("schema_version") != self.SCHEMA_VERSION:
+                return None
+
+            def mk(list_of_details):
+                return [CachedApp(d) for d in (list_of_details or [])]
+
+            return (
+                mk(payload.get("category_results")),
+                mk(payload.get("collection_results")),
+                mk(payload.get("installed_results")),
+                mk(payload.get("updates_results")),
+                mk(payload.get("all_apps")),
+            )
+        except Exception:
+            return None
+
 
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, system_mode=False, system_only_mode=False):
@@ -81,6 +252,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.updates_results = []  # Initialize empty list
         self.current_page = None  # Track current page
         self.current_group = None  # Track current group (system/collections/categories)
+        self.current_category = None          # last clicked category/subcategory key
+        self.current_category_group = None    # last clicked group
 
         # Set window size
         self.set_default_size(1280, 720)
@@ -250,8 +423,9 @@ class MainWindow(Gtk.ApplicationWindow):
                 min-width: 24px;
             }
 
-            # revealer and tool_box are hidden components inside GtkSearchBar
-            # This gets rid of the stupid grey line the tool_box causes.
+            /* revealer and tool_box are hidden components inside GtkSearchBar
+               This gets rid of the stupid grey line the tool_box causes.
+            */
             #search_hidden_revealer,
             #search_hidden_tool_box {
                 background: transparent;
@@ -616,8 +790,20 @@ class MainWindow(Gtk.ApplicationWindow):
         self.metadata_error = None
         self._metadata_fetch_seq = 0
 
-        # Start background fetch immediately (no blocking dialog)
-        self.start_metadata_refresh(show_error_dialog=False)
+        # Cache helper
+        self._metadata_cache = MetadataCache(self.system_mode)
+
+        # 1) Load cached metadata immediately
+        cached = self._metadata_cache.load()
+        if cached:
+            (self.category_results,
+            self.collection_results,
+            self.installed_results,
+            self.updates_results,
+            self.all_apps) = cached
+            self.metadata_loaded = True
+            self.metadata_loading = False
+            self.metadata_error = None
 
         # Create main layout
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -633,12 +819,37 @@ class MainWindow(Gtk.ApplicationWindow):
         # Select Trending by default
         self.select_default_category()
 
+        self.refresh_local()
+
+        # 3) Refresh in background (non-blocking)
+        self.start_metadata_refresh(show_error_dialog=False, force=False)
+
+
+    def _refresh_visible_page(self):
+        # Prefer your internal state if it exists
+        if self.current_page and self.current_group:
+            self.show_category_apps(self.current_page)
+            return
+
+        # Fallback: if you have a sidebar listbox, use its selection
+        row = self.category_listbox.get_selected_row() if hasattr(self, "category_listbox") else None
+        if row and hasattr(row, "category") and hasattr(row, "group"):
+            self.current_page = row.category
+            self.current_group = row.group
+            self.show_category_apps(self.current_page)
+            return
+
+        # Last-resort: refresh the default you say is visible
+        self.current_group = "system"
+        self.current_page = "installed"
+        self.show_category_apps("installed")
+
     def _collections_keys(self):
         return set(self.category_groups.get('collections', {}).keys())
 
     def _show_loading_view(self, message="Fetching Metadata… Please wait"):
         """Replace right panel content with a centered spinner + message."""
-        self._clear_container()
+        self._clear_views_container()
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         outer.set_hexpand(True)
@@ -672,7 +883,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _show_loading_error_view(self, message):
         """Show an in-page error (instead of a startup blocking dialog)."""
-        self._clear_container()
+        self._clear_views_container()
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         outer.set_hexpand(True)
@@ -684,7 +895,10 @@ class MainWindow(Gtk.ApplicationWindow):
         center.set_hexpand(True)
         center.set_vexpand(True)
 
-        icon = Gtk.Image.new_from_gicon(Gio.Icon.new_for_string("dialog-error-symbolic"), 6)
+        icon = Gtk.Image.new_from_gicon(
+            Gio.Icon.new_for_string("dialog-error-symbolic"),
+            Gtk.IconSize.DIALOG
+        )
         icon.set_pixel_size(64)
 
         title = Gtk.Label(label="Metadata fetch failed")
@@ -710,20 +924,29 @@ class MainWindow(Gtk.ApplicationWindow):
         self.right_container.pack_start(outer, True, True, 0)
         self.right_container.show_all()
 
-    def start_metadata_refresh(self, show_error_dialog=False):
-        """
-        Start metadata fetch in the background.
-        When it finishes, refresh the current page ONLY if the user is still on a collections page.
-        """
-        # Prevent duplicate refresh threads
+    def start_metadata_refresh(self, show_error_dialog=False, force=False):
+        logger.info("start_metadata_refresh(force=%s) loaded=%s loading=%s should_refresh=%s stamp=%s",
+                    force,
+                    getattr(self, "metadata_loaded", False),
+                    getattr(self, "metadata_loading", False),
+                    should_refresh_metadata(self.system_mode),
+                    _metadata_stamp_path(self.system_mode))
+
         if getattr(self, "metadata_loading", False):
             return
 
+        need_refresh = force or should_refresh_metadata(self.system_mode)
+        if not need_refresh and self.metadata_loaded and getattr(self, "all_apps", None):
+            # Nothing to do; we already have displayable data
+            return
+
+        # If you have metadata already loaded for this session and it isn't stale, don't do anything.
+        if getattr(self, "metadata_loaded", False) and not need_refresh:
+            return
+
         self.metadata_loading = True
-        self.metadata_loaded = False
         self.metadata_error = None
 
-        # Sequence number prevents stale threads from overwriting newer results
         self._metadata_fetch_seq = getattr(self, "_metadata_fetch_seq", 0) + 1
         seq = self._metadata_fetch_seq
 
@@ -732,28 +955,40 @@ class MainWindow(Gtk.ApplicationWindow):
 
         def worker():
             try:
-                category_results, collection_results, installed_results, updates_results, all_apps = \
-                    searcher.retrieve_metadata(self.system_mode)
+                (results, did_refresh) = retrieve_metadata_compat(searcher, self.system_mode, need_refresh)
+                category_results, collection_results, installed_results, updates_results, all_apps = results
 
                 def apply_results():
-                    # Ignore if another refresh started after this one
                     if seq != getattr(self, "_metadata_fetch_seq", seq):
                         return False
-
                     self.category_results = category_results
                     self.collection_results = collection_results
                     self.installed_results = installed_results
                     self.updates_results = updates_results
                     self.all_apps = all_apps
 
+                    # Save cache (best effort)
+                    try:
+                        self._metadata_cache.save(
+                            self.category_results,
+                            self.collection_results,
+                            self.installed_results,
+                            self.updates_results,
+                            self.all_apps
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to save metadata cache: %s", e)
+
                     self.metadata_loading = False
                     self.metadata_loaded = True
                     self.metadata_error = None
 
-                    # Refresh only if user is still on a collections page
-                    if self.current_group == "collections" and self.current_page in collections_keys:
-                        self.refresh_current_page()
+                    # Only stamp if we actually refreshed
+                    if did_refresh:
+                        mark_metadata_refreshed(self.system_mode)
 
+                    # Always re-render the currently visible page after metadata changes.
+                    self._refresh_visible_page()
                     return False
 
                 GLib.idle_add(apply_results)
@@ -766,14 +1001,16 @@ class MainWindow(Gtk.ApplicationWindow):
                         return False
 
                     self.metadata_loading = False
-                    self.metadata_loaded = False
+                    # Keep cached data usable if we have it
+                    if getattr(self, "all_apps", None):
+                        self.metadata_loaded = True
+                    else:
+                        self.metadata_loaded = False
                     self.metadata_error = err_text
 
-                    # Show in-page error if user is on a collections page
                     if self.current_group == "collections" and self.current_page in collections_keys:
                         self._show_loading_error_view(err_text)
 
-                    # Optional error dialog (not for startup)
                     if show_error_dialog:
                         dlg = Gtk.MessageDialog(
                             transient_for=self,
@@ -791,8 +1028,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
                 GLib.idle_add(apply_error)
 
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
+        threading.Thread(target=worker, daemon=True).start()
+
 
 
     def on_drag_data_received(self, widget, context, x, y, data, info, time):
@@ -1050,10 +1287,9 @@ class MainWindow(Gtk.ApplicationWindow):
         about_dialog.destroy()
 
     def on_refresh_metadata_button_clicked(self, button):
-        self.start_metadata_refresh(show_error_dialog=True)
-
         if self.current_group == "collections" and self.current_page in self._collections_keys():
             self._show_loading_view("Fetching Metadata… Please wait")
+        self.start_metadata_refresh(show_error_dialog=True, force=True)
 
 
     def on_component_type_changed(self, combo):
@@ -1069,33 +1305,29 @@ class MainWindow(Gtk.ApplicationWindow):
         self.refresh_current_page()
 
     def relaunch_as_user(self):
-        uid = int(os.environ.get('ORIG_USER', ''))
-        try:
-            pw_record = pwd.getpwuid(uid)
-            username = pw_record.pw_name
-            user_home = pw_record.pw_dir
-            gid = pw_record.pw_gid
+        uid_str = (
+            os.environ.get("ORIG_USER")
+            or os.environ.get("SUDO_UID")
+            or os.environ.get("PKEXEC_UID")
+            or str(os.getuid())
+        )
+        uid = int(uid_str)
 
-            # Drop privileges before exec
-            os.setgid(gid)
-            os.setuid(uid)
+        pw_record = pwd.getpwuid(uid)
+        username = pw_record.pw_name
+        user_home = pw_record.pw_dir
+        gid = pw_record.pw_gid
 
-            # Update environment
-            os.environ["HOME"] = user_home
-            os.environ["LOGNAME"] = username
-            os.environ["USER"] = username
-            os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+        os.setgid(gid)
+        os.setuid(uid)
 
-            # Re-exec the script
-            script_path = Path(__file__).resolve()
-            os.execvp(
-                sys.executable,
-                [sys.executable, str(script_path)]
-            )
+        os.environ["HOME"] = user_home
+        os.environ["LOGNAME"] = username
+        os.environ["USER"] = username
+        os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
 
-        except Exception as e:
-            print(f"Failed to drop privileges and exec: {e}")
-            sys.exit(1)
+        script_path = Path(__file__).resolve()
+        os.execvp(sys.executable, [sys.executable, str(script_path)])
 
     def on_system_mode_toggled(self, switch, gparam):
         """Handle system mode toggle switch state changes"""
@@ -1231,17 +1463,16 @@ class MainWindow(Gtk.ApplicationWindow):
         refresh_thread = threading.Thread(target=retrieve_metadata)
         refresh_thread.start()
         def update_progress():
-            while refresh_thread.is_alive():
+            if refresh_thread.is_alive():
                 progress_bar.set_text("Fetching...")
-                progress = searcher.refresh_progress
-                progress_bar.set_fraction(progress / 100)
+                progress_bar.set_fraction(searcher.refresh_progress / 100.0)
                 return True
-            else:
-                progress_bar.set_fraction(100 / 100)
-                dialog.destroy()
+            progress_bar.set_fraction(1.0)
+            dialog.destroy()
+            return False
 
         # Start the progress update timer
-        GLib.timeout_add_seconds(0.5, update_progress)
+        GLib.timeout_add(250, update_progress)
         dialog.run()
         if not refresh_thread.is_alive() and dialog.is_active():
             dialog.destroy()
@@ -1408,7 +1639,8 @@ class MainWindow(Gtk.ApplicationWindow):
         search_term = searchentry.get_text().lower()
         if not search_term:
             # Reset to showing all categories when search is empty
-            self.show_category_apps(self.current_category)
+            if self.current_page and self.current_group:
+                self.show_category_apps(self.current_page)
             return
 
         # Combine all searchable fields
@@ -1512,6 +1744,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.updates_results == []:
             self.updates_available_bar.set_visible(False)
 
+        self.current_category = category
+        self.current_category_group = group
         self.current_page = category
         self.current_group = group
         self.update_category_header(category)
@@ -1537,7 +1771,7 @@ class MainWindow(Gtk.ApplicationWindow):
         display_title = ""
         if category in self.category_groups['system']:
             display_title = self.category_groups['system'][category]
-        if category in self.category_groups['collections']:
+        elif category in self.category_groups['collections']:
             display_title = self.category_groups['collections'][category]
         elif category in self.category_groups['categories']:
             display_title = self.category_groups['categories'][category]
@@ -1826,7 +2060,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 success, message = fp_turbo.update_all_flatpaks(self.updates_results, self.system_mode)
 
                 # Update UI on main thread
-                GLib.idle_add(lambda: self.on_task_complete(dialog, success, message))
+                GLib.idle_add(lambda: self.on_task_complete(success, message))
 
             # Start spinner and begin installation
             thread = threading.Thread(target=perform_update)
@@ -1878,6 +2112,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self.subcategory_buttons[subcategory].get_style_context().add_class("selected")
 
         # Update current state
+        self.current_category = subcategory
+        self.current_category_group = 'subcategories'
         self.current_page = subcategory
         self.current_group = 'subcategories'
         self.update_category_header(subcategory)
@@ -1889,14 +2125,12 @@ class MainWindow(Gtk.ApplicationWindow):
 
     # Create and connect buttons
     def create_button(self, callback, app, label=None, condition=None):
-        """Create a button with optional visibility condition"""
-        button = Gtk.Button()
-        if label:
-            button = Gtk.Button(label=label)
+        button = Gtk.Button(label=label) if label else Gtk.Button()
         button.get_style_context().add_class("app-button")
-        if condition is not None:
-            # if not condition(app):
-                return None
+
+        if condition is not None and not condition(app):
+            return None
+
         button.connect("clicked", callback, app)
         return button
 
@@ -1915,9 +2149,14 @@ class MainWindow(Gtk.ApplicationWindow):
         return priorities.get(kind, 3)
 
     def show_category_apps(self, category):
+        if self.current_group == "system" and category == "installed":
+            if self.metadata_loading or not self.metadata_loaded:
+                self._show_loading_view("Loading installed apps…")
+                return
+
         collections_keys = self._collections_keys()  # <-- add this
 
-        if category in collections_keys:
+        if self.current_group == "collections" and category in collections_keys:
             if getattr(self, "metadata_loading", False):
                 self._show_loading_view("Fetching Metadata… Please wait")
                 return
@@ -1927,8 +2166,12 @@ class MainWindow(Gtk.ApplicationWindow):
                     self._show_loading_error_view(err)
                 else:
                     self._show_loading_view("Fetching Metadata… Please wait")
-                    self.start_metadata_refresh(show_error_dialog=False)
+                    self.start_metadata_refresh(show_error_dialog=False, force=True)
                 return
+
+        if self.metadata_loading or not self.metadata_loaded:
+            self._show_loading_view("Fetching Metadata… Please wait")
+            return
 
         # Initialize apps list
         apps = []
@@ -1936,12 +2179,12 @@ class MainWindow(Gtk.ApplicationWindow):
         vadjustment.set_value(vadjustment.get_lower())
 
         # Load system data
-        if 'installed' in category:
+        if category == "installed":
             apps.extend([app for app in self.installed_results])
-        if 'updates' in category:
+        if category == "updates":
             apps.extend([app for app in self.updates_results])
 
-        if ('installed' in category) or ('updates' in category):
+        if (category == "installed") or (category == "updates"):
             # Sort apps by component type priority
             if apps:
                 apps.sort(key=lambda app: self.get_app_priority(app.get_details()['kind']))
@@ -1992,7 +2235,7 @@ class MainWindow(Gtk.ApplicationWindow):
             ])
 
 
-        if 'repositories' in category:
+        if category == "repositories":
             # Clear existing content
             for child in self.right_container.get_children():
                 child.destroy()
@@ -2142,7 +2385,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def display_apps(self, apps):
         """Display applications in the right container."""
-        self._clear_container()
+        self._clear_views_container()
         apps_by_id = self._group_apps_by_id(apps)
         for app_id, app_data in apps_by_id.items():
             self._create_and_add_app_row(app_data)
@@ -2181,7 +2424,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # self.right_container.pack_start(Gtk.Separator(), False, False, 0)
         self.right_container.show_all()
 
-    def _clear_container(self):
+    def _clear_views_container(self):
         """Clear all children from the right container."""
         for child in self.right_container.get_children():
             child.destroy()
@@ -2531,43 +2774,32 @@ class MainWindow(Gtk.ApplicationWindow):
         return content_area
 
     def _handle_repository_selection(self, content_area, app):
-        """Handle repository selection logic"""
-        # Create the combo box
         self.repo_combo = Gtk.ComboBoxText()
 
-        # Search for available repositories containing this app
         searcher = fp_turbo.get_reposearcher(self.system_mode)
         repos = fp_turbo.repolist(self.system_mode)
-
-        # Find repositories that have this specific app
         app_id = app.get_details()['id']
-        available_repos = {
+
+        available = [
             repo for repo in repos
-            if not repo.get_disabled() and
-            searcher.search_flatpak(app_id, repo.get_name())
-        }
+            if (not repo.get_disabled()) and searcher.search_flatpak(app_id, repo.get_name())
+        ]
 
-        if available_repos:
-            self.repo_combo.remove_all()  # Clear any existing items
-
-            # Add all repositories
-            for repo in available_repos:
+        if len(available) >= 2:
+            for repo in available:
                 self.repo_combo.append_text(repo.get_name())
-
-            # Only show dropdown if there are multiple repositories
-            if len(available_repos) >= 2:
-                # Remove and re-add with dropdown visible
-                content_area.pack_start(self.repo_combo, False, False, 0)
-                self.repo_combo.set_button_sensitivity(Gtk.SensitivityType.AUTO)
-                self.repo_combo.set_active(0)
-            else:
-                # Remove and re-add without dropdown
-                content_area.remove(self.repo_combo)
-                self.repo_combo.set_active(0)
+            self.repo_combo.set_active(0)
+            content_area.pack_start(self.repo_combo, False, False, 0)
+        elif len(available) == 1:
+            # Keep a "selected repo" without showing the widget
+            self.repo_combo.append_text(available[0].get_name())
+            self.repo_combo.set_active(0)
         else:
-            self.repo_combo.remove_all()  # Clear any existing items
-            self.repo_combo.append_text("No repositories available")
-            content_area.remove(self.repo_combo)
+            # No repos found: you can choose to show a label instead
+            lbl = Gtk.Label(label="No enabled repositories contain this app.")
+            lbl.get_style_context().add_class("dim-label")
+            content_area.pack_start(lbl, False, False, 0)
+
 
     def _perform_installation(self, dialog, app, button):
         """Handle the installation process"""
@@ -2581,13 +2813,13 @@ class MainWindow(Gtk.ApplicationWindow):
                 success, message = fp_turbo.install_flatpak(app, selected_repo, self.system_mode)
             else:
                 success, message = fp_turbo.install_flatpakref(app, self.system_mode)
-            GLib.idle_add(lambda: self.on_task_complete(dialog, success, message))
+            GLib.idle_add(lambda: self.on_task_complete(success, message))
 
         thread = threading.Thread(target=installation_thread)
         thread.daemon = True
         thread.start()
 
-    def on_task_complete(self, dialog, success, message):
+    def on_task_complete(self, success, message):
         """Handle task completion"""
         message_type = Gtk.MessageType.INFO
         if not success:
@@ -2605,7 +2837,12 @@ class MainWindow(Gtk.ApplicationWindow):
             finished_dialog.destroy()
         self.refresh_local()
         self.refresh_current_page()
-        self.waiting_dialog.destroy()
+        if hasattr(self, "waiting_dialog") and self.waiting_dialog:
+            try:
+                self.waiting_dialog.destroy()
+            except Exception:
+                pass
+            self.waiting_dialog = None
 
 
     def on_remove_clicked(self, button, app):
@@ -2644,7 +2881,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 success, message = fp_turbo.remove_flatpak(app, self.system_mode)
 
                 # Update UI on main thread
-                GLib.idle_add(lambda: self.on_task_complete(dialog, success, message))
+                GLib.idle_add(lambda: self.on_task_complete(success, message))
 
             # Start spinner and begin installation
             thread = threading.Thread(target=perform_removal)
@@ -4431,7 +4668,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 success, message = fp_turbo.update_flatpak(app, self.system_mode)
 
                 # Update UI on main thread
-                GLib.idle_add(lambda: self.on_task_complete(dialog, success, message))
+                GLib.idle_add(lambda: self.on_task_complete(success, message))
 
             # Start spinner and begin installation
             thread = threading.Thread(target=perform_update)
@@ -4444,7 +4681,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Download a screenshot and save it locally"""
         try:
             # Download the image
-            response = requests.get(url)
+            response = requests.get(url, timeout=(5, 20))
             response.raise_for_status()
 
             # Create the directory if it doesn't exist
@@ -4830,8 +5067,6 @@ class MainWindow(Gtk.ApplicationWindow):
 
         url_label = Gtk.Label(label=url)
         url_label.set_use_underline(True)
-        url_label.set_use_markup(True)
-        url_label.set_markup(f'{url}')
         url_label.set_halign(Gtk.Align.START)
         url_label.get_style_context().add_class("url-list-item-url")
         url_label.get_style_context().add_class("dim-label")
@@ -4857,6 +5092,42 @@ class MainWindow(Gtk.ApplicationWindow):
         return box
 
     def on_details_clicked(self, button, app):
+        # If this is a cached proxy, resolve a real fp_turbo app object first
+        try:
+            if getattr(app, "is_cached", False):
+                details = app.get_details()
+                app_id = details.get("id")
+                repo = details.get("repo")
+
+                searcher = fp_turbo.get_reposearcher(self.system_mode)
+
+                real_app = None
+                # Try the cached repo first; fallback to scanning enabled repos
+                if repo:
+                    try:
+                        candidate = searcher.search_flatpak(app_id, repo)
+                        if candidate:
+                            real_app = candidate
+                    except Exception:
+                        pass
+
+                if real_app is None:
+                    for r in fp_turbo.repolist(self.system_mode):
+                        if r.get_disabled():
+                            continue
+                        try:
+                            candidate = searcher.search_flatpak(app_id, r.get_name())
+                            if candidate:
+                                real_app = candidate
+                                break
+                        except Exception:
+                            continue
+
+                if real_app is not None:
+                    app = real_app
+        except Exception:
+            pass
+
         """Initialize the details window setup process."""
         details = app.get_details()
 
@@ -4887,26 +5158,32 @@ class MainWindow(Gtk.ApplicationWindow):
         content_info.pack_start(summary_section, False, True, 0)
         # content_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
 
-        # Add URLs section
-        urls_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-
         title_label = Gtk.Label(label=f"Links")
         title_label.get_style_context().add_class("title-3")
         title_label.set_xalign(0)
 
+        # Add URLs section
+        urls_section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        first = True
+
         for url_type, url in details['urls'].items():
+            if not url:
+                continue
             row = self._create_url_section(url_type, url)
-            if url == "":
-                pass
-            else:
-                urls_section.pack_start(row, False, True, 0)
-                urls_section.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL),
-                                False, False, 0)
-        urls_section.remove(Gtk.Separator())
-        urls_section.pack_start(self._create_url_section("Flathub Page",
-            f"https://flathub.org/apps/details/{details['id']}"), False, True, 0)
+            if not first:
+                urls_section.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+            urls_section.pack_start(row, False, True, 0)
+            first = False
+
+        # Always add Flathub page at end
+        if not first:
+            urls_section.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+        urls_section.pack_start(
+            self._create_url_section("Flathub Page", f"https://flathub.org/apps/details/{details['id']}"),
+            False, True, 0
+        )
+
         urls_section.get_style_context().add_class("url-list")
-        # content_box.pack_start(title_label, False, True, 4)
         content_info.pack_start(urls_section, False, True, 0)
 
         content_box.pack_end(content_info, False, True, 0)
@@ -4938,50 +5215,35 @@ class MainWindow(Gtk.ApplicationWindow):
                 print(f"Error opening donation URL: {str(e)}")
 
     def on_repo_toggled(self, checkbox, repo):
-        """Handle repository enable/disable toggle"""
-        repo.set_disabled(checkbox.get_active())
-        # Update the UI to reflect the new state
-        checkbox.get_parent().set_sensitive(True)
-        if checkbox.get_active():
+        enabled = checkbox.get_active()
+
+        # Update style immediately
+        if enabled:
             checkbox.get_style_context().remove_class("dim-label")
-            success, message = fp_turbo.repotoggle(repo.get_name(), True, self.system_mode)
-            message_type = Gtk.MessageType.INFO
-            if success:
-                self.refresh_local()
-            else:
-                if message:
-                    message_type = Gtk.MessageType.ERROR
-            if message:
-                dialog = Gtk.MessageDialog(
-                    transient_for=None,  # Changed from self
-                    modal=True,
-                    destroy_with_parent=True,
-                    message_type=message_type,
-                    buttons=Gtk.ButtonsType.OK,
-                    text=message
-                )
-                dialog.run()
-                dialog.destroy()
         else:
             checkbox.get_style_context().add_class("dim-label")
-            success, message = fp_turbo.repotoggle(repo.get_name(), False, self.system_mode)
-            message_type = Gtk.MessageType.INFO
-            if success:
-                self.refresh_local()
-            else:
-                if message:
-                    message_type = Gtk.MessageType.ERROR
-            if message:
-                dialog = Gtk.MessageDialog(
-                    transient_for=None,  # Changed from self
-                    modal=True,
-                    destroy_with_parent=True,
-                    message_type=message_type,
-                    buttons=Gtk.ButtonsType.OK,
-                    text=message
-                )
-                dialog.run()
-                dialog.destroy()
+
+        success, message = fp_turbo.repotoggle(repo.get_name(), enabled, self.system_mode)
+
+        if success:
+            self.refresh_local()
+        else:
+            # revert UI if it failed
+            checkbox.handler_block_by_func(self.on_repo_toggled)
+            checkbox.set_active(not enabled)
+            checkbox.handler_unblock_by_func(self.on_repo_toggled)
+
+        if message:
+            dlg = Gtk.MessageDialog(
+                transient_for=self,
+                modal=True,
+                destroy_with_parent=True,
+                message_type=Gtk.MessageType.INFO if success else Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.OK,
+                text=message
+            )
+            dlg.run()
+            dlg.destroy()
 
     def on_repo_delete(self, button, repo):
         """Handle repository deletion"""
@@ -5149,9 +5411,19 @@ class MainWindow(Gtk.ApplicationWindow):
             self.show_category_apps('repositories')
 
     def select_default_category(self):
-        # Select Trending by default
-        if 'collections' in self.category_widgets and self.category_widgets['collections']:
-            self.on_category_clicked('trending', 'collections')
+        """
+        Startup behavior:
+        - If metadata is already available, go to Trending.
+        - Otherwise, show a local page immediately (Installed), and let metadata load in the background.
+        """
+        # Prefer something local and always available first
+        if not getattr(self, "metadata_loaded", False):
+            # Installed is fully local
+            self.on_category_clicked("installed", "system")
+            return
+
+        # Once metadata is available, default to Trending
+        self.on_category_clicked("trending", "collections")
 
 def main():
     # Initialize GTK before anything else
@@ -5216,7 +5488,8 @@ def main():
     app.connect("destroy", Gtk.main_quit)
     app.show_all()
     Gtk.main()
-    
+
+
 def cleanup_xhost():
     """Cleanup function to run xhost on exit"""
     try:

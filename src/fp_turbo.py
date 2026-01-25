@@ -116,6 +116,16 @@ class AppStreamComponentKind(IntEnum):
     ICON_THEME = 16
     """An icon theme following the XDG specification."""
 
+APPSTREAM_TTL_SECONDS = 7 * 24 * 60 * 60  # 1 week
+
+def _appstream_file_is_stale(remote: Flatpak.Remote) -> bool:
+    appstream_file = Path(remote.get_appstream_dir().get_path()) / "appstream.xml.gz"
+    try:
+        mod_time = appstream_file.stat().st_mtime
+    except FileNotFoundError:
+        return True
+    return (time.time() - mod_time) > APPSTREAM_TTL_SECONDS
+
 class AppStreamPackage:
     def __init__(self, comp: AppStream.Component, remote: Flatpak.Remote) -> None:
         self.component: AppStream.Component = comp
@@ -406,37 +416,45 @@ class AppstreamSearcher:
         remote_name = remote.get_name()
         if remote_name not in self.remotes:
             self.remotes[remote_name] = self._load_appstream_metadata(remote, inst)
+
     def _load_appstream_metadata(self, remote: Flatpak.Remote, inst: Flatpak.Installation) -> list[AppStreamPackage]:
-        """load AppStrean metadata and create AppStreamPackage objects"""
         packages = []
         metadata = AppStream.Metadata.new()
         metadata.set_format_style(AppStream.FormatStyle.CATALOG)
-        if self.refresh:
-            if remote.get_name() == "flathub" or remote.get_name() == "flathub-beta":
-                remote.set_gpg_verify(True)
-                inst.modify_remote(remote, None)
-            inst.update_appstream_full_sync(remote.get_name(), None, None, True)
-        appstream_file = Path(remote.get_appstream_dir().get_path() + "/appstream.xml.gz")
-        if not appstream_file.exists():
+
+        appstream_file = Path(remote.get_appstream_dir().get_path()) / "appstream.xml.gz"
+
+        # Only refresh if explicitly allowed AND stale/missing
+        if self.refresh and _appstream_file_is_stale(remote):
             try:
-                if remote.get_name() == "flathub" or remote.get_name() == "flathub-beta":
+                if remote.get_name() in ("flathub", "flathub-beta"):
                     remote.set_gpg_verify(True)
                     inst.modify_remote(remote, None)
                 inst.update_appstream_full_sync(remote.get_name(), None, None, True)
             except GLib.Error as e:
                 logger.error(f"Failed to update AppStream metadata: {str(e)}")
+
+        # If file still missing, try once (optional, but keeps old behavior)
+        if not appstream_file.exists():
+            try:
+                if remote.get_name() in ("flathub", "flathub-beta"):
+                    remote.set_gpg_verify(True)
+                    inst.modify_remote(remote, None)
+                inst.update_appstream_full_sync(remote.get_name(), None, None, True)
+            except GLib.Error as e:
+                logger.error(f"Failed to update AppStream metadata: {str(e)}")
+
         if appstream_file.exists():
             metadata.parse_file(Gio.File.new_for_path(appstream_file.as_posix()), AppStream.FormatKind.XML)
             components: AppStream.ComponentBox = metadata.get_components()
-            i = 0
             for i in range(components.get_size()):
                 component = components.index_safe(i)
-                #if component.get_kind() == AppStream.ComponentKind.DESKTOP_APP:
                 packages.append(AppStreamPackage(component, remote))
             return packages
-        else:
-            logger.debug(f"AppStream file not found: {appstream_file}")
-            return []
+
+        logger.debug(f"AppStream file not found: {appstream_file}")
+        return []
+
 
     def search_flatpak_repo(self, keyword: str, repo_name: str) -> list[AppStreamPackage]:
         search_results = []
