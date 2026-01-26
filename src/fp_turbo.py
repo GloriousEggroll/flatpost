@@ -251,6 +251,12 @@ class AppStreamPackage:
     def __str__(self) -> str:
         return f"{self.name} - {self.summary} ({self.flatpak_bundle})"
 
+    def _pretty_label(name: str) -> str:
+        # Title-case, but keep common acronyms uppercased
+        parts = name.replace("_", " ").split()
+        acronyms = {"id", "ui", "api", "gpu", "cpu", "url"}
+        return " ".join(p.upper() if p.lower() in acronyms else p.title() for p in parts)
+
     def get_details(self) -> dict:
         """Get all package details including icon and description"""
         return {
@@ -269,7 +275,8 @@ class AppStreamPackage:
             #"architectures": self.architectures,
             "categories": self.categories,
             "bundle_id": self.flatpak_bundle,
-            "match_type": self.match.name,
+            "match_type": _pretty_label(self.match.name),
+            "match_type_raw": self.match.name,
             "repo": self.repo_name,
             "screenshots": self.screenshots,
             "component": self.component,

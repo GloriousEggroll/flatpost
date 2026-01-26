@@ -21,6 +21,8 @@ import atexit
 from datetime import datetime, timedelta, timezone
 import logging
 import time
+import math
+from collections import Counter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -197,6 +199,38 @@ class MetadataCache:
         except Exception:
             return None
 
+def install_flatpak_compat(app, repo, system_mode: bool, progress_cb=None):
+    try:
+        return fp_turbo.install_flatpak(app, repo, system_mode, progress_cb=progress_cb)
+    except TypeError as e:
+        if "progress_cb" not in str(e):
+            raise
+        return fp_turbo.install_flatpak(app, repo, system_mode)
+
+def install_flatpakref_compat(ref_path, system_mode: bool, progress_cb=None):
+    try:
+        return fp_turbo.install_flatpakref(ref_path, system_mode, progress_cb=progress_cb)
+    except TypeError as e:
+        if "progress_cb" not in str(e):
+            raise
+        return fp_turbo.install_flatpakref(ref_path, system_mode)
+
+def pretty_type_label(t: str) -> str:
+    if not t:
+        return t
+    t = t.strip()
+
+    specials = {
+        "DESKTOP_APP": "Desktop App",
+        "WEB_APP": "Web App",
+        "CLI_APP": "CLI App",
+        "MOBILE_APP": "Mobile App",
+    }
+    if t in specials:
+        return specials[t]
+
+    # Generic: "FOO_BAR" -> "Foo Bar"
+    return t.replace("_", " ").lower().title()
 
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, system_mode=False, system_only_mode=False):
@@ -206,9 +240,18 @@ class MainWindow(Gtk.ApplicationWindow):
         elif system_mode:
             app_title = "Flatpost (system mode)"
         super().__init__(title=app_title)
+        self.right_panel = None
+        self.right_container = None
+        self.category_scrolled_window = None
+        self.category_header = None
+        self.subcategories_bar = None
+        self.updates_available_bar = None
+        self.scrolled_window = None
         self.system_mode = system_mode
         self.system_only_mode = system_only_mode
         self.system_switch = Gtk.Switch()
+        self.search_entry = Gtk.SearchEntry()
+        self._search_changed_handler_id = self.search_entry.connect("changed", self.on_search_changed)
         # Create system mode label
         self.system_label = Gtk.Label(label="System Mode")
         if self.system_mode:
@@ -219,8 +262,14 @@ class MainWindow(Gtk.ApplicationWindow):
         # Step 1: Verify file exists and is accessible
         icon_path = "/usr/share/icons/hicolor/64x64/apps/com.flatpost.flatpostapp.svg"
         if not os.path.exists(icon_path):
-            print("ERROR: Icon file not found!")
-            return
+            logger.warning("Icon file not found: %s (continuing with default icon)", icon_path)
+        else:
+            try:
+                self.pixbuf64 = GdkPixbuf.Pixbuf.new_from_file_at_scale(icon_path, 64, 64, True)
+                Gtk.Window.set_default_icon(self.pixbuf64)
+                self.set_icon_list([self.pixbuf64])
+            except Exception as e:
+                logger.warning("ERROR loading icon: %s (continuing)", e)
 
         # Step 2: Test loading individual pixbufs
         try:
@@ -786,6 +835,15 @@ class MainWindow(Gtk.ApplicationWindow):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 600
         )
 
+        self.all_components = []          # master dataset (whatever you've loaded)
+        self.filtered_components = []     # post-filter list (optional but handy)
+
+        self.current_search_text = ""
+        self.current_type = "ALL"
+        self.current_sort = "NAME"        # whatever your default is
+        self.list_page = 1
+        self.page_size = 30               # example
+
         # Metadata fetch state
         self.metadata_loading = False
         self.metadata_loaded = False
@@ -817,6 +875,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Create panels
         self.create_panels()
+        self.component_type_combo.connect("changed", self.on_component_type_changed)
+
 
         # Select Trending by default
         self.select_default_category()
@@ -826,31 +886,158 @@ class MainWindow(Gtk.ApplicationWindow):
         # 3) Refresh in background (non-blocking)
         self.start_metadata_refresh(show_error_dialog=False, force=False)
 
+    def _d(self, obj, key, default=""):
+        """Read a field from either fp_turbo app objects or cached proxies."""
+        try:
+            if hasattr(obj, "get_details"):
+                return (obj.get_details() or {}).get(key, default)
+        except Exception:
+            pass
+        return getattr(obj, key, default)
+
+    def _kind_id(self, kind) -> str:
+        if kind is None:
+            return "UNKNOWN"
+
+        # If it's an enum-like object
+        name = getattr(kind, "name", None)
+        if isinstance(name, str) and name:
+            return name.upper()
+
+        # Some GI objects stringify nicely (e.g. "AppStream.ComponentKind.DESKTOP_APP")
+        if not isinstance(kind, str):
+            s = str(kind)
+            if "." in s:
+                tail = s.split(".")[-1]
+                if tail:
+                    return tail.upper()
+            # if it's an int enum value
+            if isinstance(kind, int):
+                return str(kind)
+
+            return s.upper()
+
+        # string normalization
+        s = kind.strip().upper()
+        s = s.replace("-", "_").replace(" ", "_")
+        return s
+
+
+    def _get_component_kind(self, c):
+        if isinstance(c, dict):
+            # common keys
+            for k in ("kind", "component_kind", "componentKind", "type"):
+                if k in c:
+                    return c[k]
+
+            # nested forms
+            for k in ("details", "component", "appstream"):
+                inner = c.get(k)
+                if inner is not None:
+                    got = self._get_component_kind(inner)
+                    if got is not None:
+                        return got
+
+            return None
+
+        get_kind = getattr(c, "get_kind", None)
+        if callable(get_kind):
+            return get_kind()
+
+        # last resort attribute
+        return getattr(c, "kind", None)
+
+
+    def update_component_view(self, keep_page=False):
+        search_text = (self.current_search_text or "").strip().lower()
+        selected_type = (self.current_type or "ALL")
+
+        # Start from source list
+        items = list(self.all_components or [])
+
+        kinds_before = Counter(self._kind_id(self._get_component_kind(c)) for c in items)
+
+        # --- TYPE FILTER ---
+        # Normalize dropdown value into the same id space as component kinds.
+        # If current_type is already an id, _kind_id should leave it stable.
+        # If it's a label, you should map it (see mapping note below).
+        selected_type = (self.current_type or "ALL")
+        selected_type_id = self._kind_id(selected_type)
+
+        if selected_type_id != "ALL":
+            items = [
+                c for c in items
+                if self._kind_id(self._get_component_kind(c)) == selected_type_id
+            ]
+
+        # --- SEARCH FILTER ---
+        if search_text:
+            def matches_search(c):
+                name = (self._d(c, "name", "") or "").lower()
+                summary = (self._d(c, "summary", "") or "").lower()
+                desc = (self._d(c, "description", "") or "").lower()
+                appid = (self._d(c, "id", "") or "").lower()
+                return (search_text in name or search_text in summary or search_text in desc or search_text in appid)
+
+            items = [c for c in items if matches_search(c)]
+
+        # --- SORT ---
+        items = self.sort_components(items, self.current_sort)
+        self.filtered_components = items
+
+        # --- PAGINATION ---
+        total = len(items)
+        max_page = max(1, math.ceil(total / self.page_size))
+
+        if not keep_page:
+            self.list_page = 1
+        else:
+            # If filtering reduces total pages, clamp the current page
+            self.list_page = min(max(1, self.list_page), max_page)
+
+        start = (self.list_page - 1) * self.page_size
+        end = start + self.page_size
+        page_items = items[start:end]
+
+        self.render_component_list(page_items, total_count=total)
+
+
+
+    def sort_components(self, items, sort_mode):
+        if sort_mode == "NAME":
+            return sorted(items, key=lambda c: (self._d(c, "name", "") or "").lower())
+        if sort_mode == "KIND":
+            return sorted(items, key=lambda c: (self._d(c, "kind", "") or ""))
+        return items
+
+    def render_component_list(self, page_items, total_count):
+        # Minimal: reuse your existing renderer
+        self.display_apps(page_items)
 
     def _refresh_visible_page(self):
-        # Prefer your internal state if it exists
         if self.current_page and self.current_group:
             self.refresh_current_page(preserve_scroll=True)
             return
 
-        # Fallback: if you have a sidebar listbox, use its selection
-        row = self.category_listbox.get_selected_row() if hasattr(self, "category_listbox") else None
-        if row and hasattr(row, "category") and hasattr(row, "group"):
-            self.current_page = row.category
-            self.current_group = row.group
-            self.refresh_current_page(preserve_scroll=True)
-            return
-
-        # Last-resort: refresh the default you say is visible
-        self.current_group = "system"
-        self.current_page = "installed"
-        self.show_category_apps("installed")
+        # If we don't know, default to trending collections (what you show at startup)
+        self.current_group = "collections"
+        self.current_page = "trending"
+        self.update_category_header("trending")
+        self.update_subcategories_bar("trending")
+        self.update_updates_available_bar("trending")
+        self.show_category_apps("trending")
 
     def _collections_keys(self):
         return set(self.category_groups.get('collections', {}).keys())
 
+    def _ensure_right_container(self) -> bool:
+        return getattr(self, "right_container", None) is not None
+
     def _show_loading_view(self, message="Fetching Metadata… Please wait"):
         """Replace right panel content with a centered spinner + message."""
+        if not self._ensure_right_container():
+            logger.warning("Right container not ready yet; skipping loading view")
+            return
         self._clear_views_container()
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -1031,9 +1218,12 @@ class MainWindow(Gtk.ApplicationWindow):
     def on_drag_data_received(self, widget, context, x, y, data, info, time):
         """Handle drag and drop events"""
         # Check if data is a URI list
-        if isinstance(data, int):
+        uris = data.get_uris() if data else []
+        if not uris:
+            context.finish(False, False, time)
             return
-        uri = data.get_uris()[0]
+
+        uri = uris[0]
         file_path = Gio.File.new_for_uri(uri).get_path()
         if file_path and file_path.endswith('.flatpakref'):
             self.handle_flatpakref_file(file_path)
@@ -1108,18 +1298,31 @@ class MainWindow(Gtk.ApplicationWindow):
         self.component_type_combo.set_vexpand(False)
         self.component_type_combo.set_wrap_width(1)
         self.component_type_combo.set_size_request(150, 32)  # Set width in pixels
-        self.component_type_combo.connect("changed", self.on_component_type_changed)
 
         # Add "ALL" option first
-        self.component_type_combo.append_text("ALL")
+        self.component_type_combo.append("ALL", "All")
 
-        # Add all component types
+        # Build list of raw type strings from the enum
+        raw_types = []
         for kind in AppKind:
-            if kind != AppKind.UNKNOWN:
-                self.component_type_combo.append_text(kind.name)
+            # Depending on how fp_turbo defines the enum, one of these will work:
+            raw = getattr(kind, "name", None) or getattr(kind, "value", None) or str(kind)
+            raw = str(raw)
+            raw_types.append(raw)
 
-        # Select "ALL" by default
-        self.component_type_combo.set_active(0)
+        # Optional: remove weird duplicates like "AppStreamComponentKind.DESKTOP_APP"
+        def normalize_raw(raw: str) -> str:
+            # If str(kind) looks like "AppStreamComponentKind.DESKTOP_APP"
+            if "." in raw:
+                raw = raw.split(".")[-1]
+            return raw
+
+        raw_types = sorted({normalize_raw(r) for r in raw_types})
+
+        for raw in raw_types:
+            self.component_type_combo.append(raw, pretty_type_label(raw))
+
+        self.component_type_combo.set_active_id("ALL")
 
         # Add dropdown to header bar
         self.top_bar.pack_start(self.component_type_combo_label, False, False, 0)
@@ -1287,18 +1490,28 @@ class MainWindow(Gtk.ApplicationWindow):
             self._show_loading_view("Fetching Metadata… Please wait")
         self.start_metadata_refresh(show_error_dialog=True, force=True)
 
+    def component_kind_raw(self, component) -> str:
+        kind = getattr(component, "kind", None) or getattr(component, "type", None)
+        if kind is None:
+            return ""
+        raw = getattr(kind, "name", None) or getattr(kind, "value", None) or str(kind)
+        raw = str(raw).strip()
+        if "." in raw:
+            raw = raw.split(".")[-1]
+        return raw
 
     def on_component_type_changed(self, combo):
-        """Handle component type filter changes"""
-        selected_type = combo.get_active_text()
-        if selected_type:
-            if selected_type == "ALL":
-                self.current_component_type = None
-            else:
-                self.current_component_type = selected_type
-        else:
-            self.current_component_type = None
-        self.refresh_current_page()
+        # If you're on Repositories page, ignore filtering (it isn't app rows)
+        if getattr(self, "current_page", None) == "repositories":
+            return
+
+        selected = combo.get_active_id() or "ALL"
+        self.current_type = selected
+
+        # optional: keep old variable working (you use current_component_type elsewhere)
+        self.current_component_type = None if selected == "ALL" else selected
+
+        self.update_component_view(keep_page=False)
 
     def relaunch_as_user(self):
         uid_str = (
@@ -1438,23 +1651,35 @@ class MainWindow(Gtk.ApplicationWindow):
         # Define thread target function
         def retrieve_metadata():
             try:
-                category_results, collection_results, installed_results, updates_results, all_apps = searcher.retrieve_metadata(self.system_mode)
-                self.category_results = category_results
-                self.collection_results = collection_results
-                self.installed_results = installed_results
-                self.updates_results = updates_results
-                self.all_apps = all_apps
+                results = searcher.retrieve_metadata(self.system_mode)
+                def apply():
+                    (category_results, collection_results,
+                    installed_results, updates_results, all_apps) = results
+                    self.category_results = category_results
+                    self.collection_results = collection_results
+                    self.installed_results = installed_results
+                    self.updates_results = updates_results
+                    self.all_apps = all_apps
+                    # optionally refresh visible page here
+                    # self.refresh_current_page(preserve_scroll=True)
+                    return False
+                GLib.idle_add(apply)
             except Exception as e:
-                dialog = Gtk.MessageDialog(
-                    transient_for=None,  # Changed from self
-                    modal=True,
-                    destroy_with_parent=True,
-                    message_type=Gtk.MessageType.ERROR,
-                    buttons=Gtk.ButtonsType.OK,
-                    text=f"Error retrieving metadata: {str(e)}"
-                )
-                dialog.run()
-                dialog.destroy()
+                err = str(e)
+                def _show():
+                    dlg = Gtk.MessageDialog(
+                        transient_for=self,
+                        modal=True,
+                        destroy_with_parent=True,
+                        message_type=Gtk.MessageType.ERROR,
+                        buttons=Gtk.ButtonsType.OK,
+                        text=f"Error retrieving metadata: {err}"
+                    )
+                    dlg.run()
+                    dlg.destroy()
+                    return False
+                GLib.idle_add(_show)
+
         # Start the refresh thread
         refresh_thread = threading.Thread(target=retrieve_metadata)
         refresh_thread.start()
@@ -1494,29 +1719,26 @@ class MainWindow(Gtk.ApplicationWindow):
 
 
     def create_panels(self):
-        # Check if panels already exist
-        if hasattr(self, 'left_panel') and self.left_panel.get_parent():
-            self.main_box.remove(self.left_panel)
+        # Safely remove existing panels from their current parent
+        for attr in ("left_panel", "right_panel", "panels_box"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                parent = w.get_parent()
+                if parent is not None:
+                    parent.remove(w)
 
-        if hasattr(self, 'right_panel') and self.right_panel.get_parent():
-            self.main_box.remove(self.right_panel)
-
-        # Create left panel with grouped categories
+        # Create left/right panels
         self.left_panel = self.create_grouped_category_panel("Categories", self.category_groups)
-
-        # Create right panel
         self.right_panel = self.create_applications_panel("Applications")
 
-        # Create panels container
         self.panels_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self.panels_box.set_hexpand(True)
 
-        # Pack the panels with proper expansion
-        self.panels_box.pack_start(self.left_panel, False, False, 0)  # Left panel doesn't expand
-        self.panels_box.pack_end(self.right_panel, True, True, 0)    # Right panel expands both ways
+        self.panels_box.pack_start(self.left_panel, False, False, 0)
+        self.panels_box.pack_end(self.right_panel, True, True, 0)
 
-        # Add panels container to main box
         self.main_box.pack_start(self.panels_box, True, True, 0)
+
 
     def create_grouped_category_panel(self, title, groups):
 
@@ -1631,30 +1853,22 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def on_search_activate(self, searchentry):
         """Handle Enter key press in search"""
-        self.update_category_header("Search Results")
-        search_term = searchentry.get_text().lower()
-        if not search_term:
-            # Reset to showing all categories when search is empty
-            if self.current_page and self.current_group:
-                self.show_category_apps(self.current_page)
+        text = (searchentry.get_text() or "").strip()
+        self.current_search_text = text
+
+        if not text:
+            # Clear search: go back to whatever page you were on
+            self.update_category_header(self.current_page or "")
+            self.refresh_current_page(preserve_scroll=True)
             return
 
-        # Combine all searchable fields
-        searchable_items = []
-        for app in self.all_apps:
-            details = app.get_details()
-            searchable_items.append({
-                'app': app,
-                'id': details['id'].lower(),
-                'text': f"{details['name']} {details['description']} {details['categories']}".lower(),
-                'name': details['name'].lower()
-            })
+        # Searching is global across all apps
+        self.update_category_header("Search Results")
 
-        # Filter and rank results
-        filtered_apps = self.rank_search_results(search_term, searchable_items)
+        # IMPORTANT: set master dataset for filtering
+        self.all_components = list(self.all_apps or [])
 
-        # Show search results
-        self.show_search_results(filtered_apps)
+        self.update_component_view(keep_page=False)
 
     def rank_search_results(self, search_term, searchable_items):
         """Rank search results based on match type and component type filter"""
@@ -1701,6 +1915,28 @@ class MainWindow(Gtk.ApplicationWindow):
         """Display search results in the right panel"""
         self.display_apps(apps)
 
+
+    def reset_search_state(self):
+        # state
+        self.current_search_text = ""
+        self.list_page = 1  # your list pagination var
+        # (optional) if you also track a page per-category, reset that too
+        # self.current_page_number = 1
+
+        # UI: clear the actual SearchEntry / Entry if you have it
+        entry = getattr(self, "search_entry", None) or getattr(self, "search_field", None)
+        if entry is not None:
+            # Avoid triggering "changed" handler twice if it live-updates
+            handler_id = getattr(self, "_search_changed_handler_id", None)
+            if handler_id is not None:
+                entry.handler_block(handler_id)
+
+            entry.set_text("")
+            entry.set_position(0)
+
+            if handler_id is not None:
+                entry.handler_unblock(handler_id)
+
     def on_category_clicked(self, category, group, *args):
         # Remove active state and reset labels for all widgets
         for group_name in self.category_widgets:
@@ -1744,6 +1980,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.current_category_group = group
         self.current_page = category
         self.current_group = group
+
+        # ✅ reset search when switching category
+        self.reset_search_state()
+
         self.update_category_header(category)
         self.update_subcategories_bar(category)
         self.update_updates_available_bar(category)
@@ -1977,9 +2217,11 @@ class MainWindow(Gtk.ApplicationWindow):
             child.destroy()
         self.subcategory_buttons.clear()
 
-        if not hasattr(self, 'scrolled_window'):
+        # FIX: hasattr() isn't enough because you set self.scrolled_window = None
+        if not getattr(self, "scrolled_window", None):
             self.scrolled_window = Gtk.ScrolledWindow()
 
+        # Now safe
         for child in self.scrolled_window.get_children():
             child.destroy()
 
@@ -2177,7 +2419,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
                 if apps:
                     apps.sort(key=lambda app: self.get_app_priority(app.get_details().get('kind')))
-                self.display_apps(apps)
+                self.all_components = list(apps)
+                self.update_component_view(keep_page=preserve_scroll)
                 return
 
             # Everything else needs metadata
@@ -2391,11 +2634,9 @@ class MainWindow(Gtk.ApplicationWindow):
             return
 
         # Apply component type filter if set
-        component_type_filter = self.current_component_type
-        if component_type_filter:
-            apps = [app for app in apps if app.get_details()['kind'] == component_type_filter]
-
-        self.display_apps(apps)
+        self.all_components = list(apps)
+        self.update_component_view(keep_page=preserve_scroll)
+        return
 
     def create_scaled_icon(self, icon, size=64, is_themed=False):
         if is_themed:
@@ -2457,9 +2698,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.right_container.show_all()
 
     def _clear_views_container(self):
-        """Clear all children from the right container."""
+        if not hasattr(self, "right_container") or self.right_container is None:
+            return
         for child in self.right_container.get_children():
-            child.destroy()
+            self.right_container.remove(child)
 
     def _group_apps_by_id(self, apps):
         """Group applications by their IDs and collect repositories."""
@@ -2600,7 +2842,7 @@ class MainWindow(Gtk.ApplicationWindow):
         name = details.get('name') or details.get('id') or "Unknown"
         developer = details.get('developer') or ""
         summary = details.get('summary') or ""
-        kind = details.get('kind') or "UNKNOWN"
+        kind = self._kind_id(details.get("kind"))
 
         # Title
         title_label = Gtk.Label(label=name)
@@ -2801,59 +3043,22 @@ class MainWindow(Gtk.ApplicationWindow):
 
         return None
 
-    def show_install_progress_dialog(self, title="Installing…", subtitle="Please wait while task is running"):
-        if getattr(self, "waiting_dialog", None):
-            try:
-                self.waiting_dialog.destroy()
-            except Exception:
-                pass
-
-        dialog = Gtk.Dialog(
-            title=title,
-            transient_for=self,
-            modal=True,
-            destroy_with_parent=True
-        )
-        dialog.set_default_size(420, -1)
-
-        box = dialog.get_content_area()
-        box.set_spacing(10)
-        box.set_margin_top(12)
-        box.set_margin_bottom(12)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
-
-        status_label = Gtk.Label(label=subtitle)
-        status_label.set_xalign(0)
-
-        pbar = Gtk.ProgressBar()
-        pbar.set_show_text(True)
-        pbar.set_fraction(0.0)
-        pbar.set_text("0%")
-
-        box.add(status_label)
-        box.add(pbar)
-        box.show_all()
-
-        self.waiting_dialog = dialog
-        self.install_status_label = status_label
-        self.install_progressbar = pbar
-
-        dialog.show()
-
 
     def update_install_progress(self, pct: int, status: str = ""):
-        if not getattr(self, "install_progress_bar", None):
+        pbar = getattr(self, "install_progress_bar", None)
+        if pbar is None:
             return False
 
         frac = max(0.0, min(1.0, pct / 100.0))
-        self.install_progress_bar.set_fraction(frac)
-        self.install_progress_bar.set_text(f"{pct}%")
+        pbar.set_fraction(frac)
+        pbar.set_text(f"{pct}%")
 
-        if getattr(self, "install_progress_label", None):
-            self.install_progress_label.set_text(status or "Installing…")
+        label = getattr(self, "install_progress_label", None)
+        if label is not None:
+            label.set_text(status or "Working…")
 
-        return False  # important for idle_add: don't repeat
+        return False  # for GLib.idle_add
+
 
 
     def show_waiting_dialog(self, message="Please wait while task is running..."):
@@ -2964,6 +3169,13 @@ class MainWindow(Gtk.ApplicationWindow):
             content_area.pack_start(lbl, False, False, 0)
 
     def show_install_progress_dialog(self, title="Please wait while task is running"):
+        if getattr(self, "waiting_dialog", None):
+            try:
+                self.waiting_dialog.destroy()
+            except Exception:
+                pass
+            self.waiting_dialog = None
+
         self.waiting_dialog = Gtk.Dialog(
             title=title,
             transient_for=self,
@@ -3000,10 +3212,10 @@ class MainWindow(Gtk.ApplicationWindow):
             GLib.idle_add(self.show_install_progress_dialog)
 
             if button:
-                success, message = fp_turbo.install_flatpak(app, selected_repo, self.system_mode, progress_cb=progress_cb)
+                success, message = install_flatpak_compat(app, selected_repo, self.system_mode, progress_cb=progress_cb)
                 aid = app.get_details().get("id")
             else:
-                success, message = fp_turbo.install_flatpakref(app, self.system_mode, progress_cb=progress_cb)
+                success, message = install_flatpakref_compat(app, self.system_mode, progress_cb=progress_cb)
                 aid = str(app)
 
             GLib.idle_add(lambda: self.on_task_complete(success, message, aid))
