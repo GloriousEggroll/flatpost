@@ -19,3 +19,10 @@ jobs:
       version: ${{ needs.version.outputs.version }}
       shasum: ${{ github.sha }}
 
+  fedora43-build:
+    name: Fedora 43 Build
+    uses: ./.github/workflows/build-flatpost-f43.yml
+    needs: version
+    with:
+      version: ${{ needs.version.outputs.version }}
+      shasum: ${{ github.sha }}

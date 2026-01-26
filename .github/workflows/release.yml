@@ -21,3 +21,19 @@ jobs:
       name1: flatpost-${{ github.ref_name }}.fc42.rpm
       file2: flatpost-${{ github.ref_name }}.fc42.src.rpm
       name2: flatpost-${{ github.ref_name }}.fc42.src.rpm
+  fedora43-build:
+    name: Fedora 43 Build
+    uses: ./.github/workflows/build-flatpost-f43.yml
+    with:
+      version: ${{ github.ref_name }}
+      shasum: ${{ github.sha }}
+  fedora43-release:
+    name: Fedora 43 Release ${{ github.ref_name }}
+    needs: fedora43-build
+    uses: ./.github/workflows/build-flatpost-publish-release.yml
+    with:
+      version: ${{ github.ref_name }}
+      file1: flatpost-${{ github.ref_name }}.fc43.rpm
+      name1: flatpost-${{ github.ref_name }}.fc43.rpm
+      file2: flatpost-${{ github.ref_name }}.fc43.src.rpm
+      name2: flatpost-${{ github.ref_name }}.fc43.src.rpm
