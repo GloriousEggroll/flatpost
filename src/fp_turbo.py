@@ -51,6 +51,7 @@ import sys
 import json
 import time
 import dbus
+import platform
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -132,7 +133,8 @@ class AppStreamPackage:
         self.remote: Flatpak.Remote = remote
         self.repo_name: str = remote.get_name()
         bundle: AppStream.Bundle = comp.get_bundle(AppStream.BundleKind.FLATPAK)
-        self.flatpak_bundle: str = bundle.get_id()
+        self.flatpak_bundle = bundle.get_id() if bundle else ""
+        self.flatpak_app_id = self._extract_app_id(self.flatpak_bundle) or self._strip_desktop_suffix(comp.get_id())
         self.match = Match.NONE
 
         # Get icon and description
@@ -148,6 +150,26 @@ class AppStreamPackage:
 
         self.developer = self.component.get_developer().get_name()
         self.categories = self._get_categories()
+
+    @staticmethod
+    def _strip_desktop_suffix(s: str) -> str:
+        return s[:-8] if s and s.endswith(".desktop") else s
+
+    @staticmethod
+    def _extract_app_id(bundle_id: str) -> str:
+        """
+        bundle_id might be:
+          - 'com.vscodium.codium'
+          - 'app/com.vscodium.codium/x86_64/stable'
+        """
+        if not bundle_id:
+            return ""
+        b = bundle_id.strip()
+        if b.startswith("app/") or b.startswith("runtime/"):
+            parts = b.split("/")
+            if len(parts) >= 2:
+                return parts[1]
+        return b
 
     @property
     def id(self) -> str:
@@ -251,7 +273,7 @@ class AppStreamPackage:
     def __str__(self) -> str:
         return f"{self.name} - {self.summary} ({self.flatpak_bundle})"
 
-    def _pretty_label(name: str) -> str:
+    def _pretty_label(self, name: str) -> str:
         # Title-case, but keep common acronyms uppercased
         parts = name.replace("_", " ").split()
         acronyms = {"id", "ui", "api", "gpu", "cpu", "url"}
@@ -261,7 +283,9 @@ class AppStreamPackage:
         """Get all package details including icon and description"""
         return {
             "name": self.name,
-            "id": self.id,
+            "id": getattr(self, "installed_app_id", None) or self.flatpak_app_id,
+            "flatpak_app_id": self.flatpak_app_id,          # keep both for debugging
+            "component_id": self.id,
             "kind": self.kind,
             "summary": self.summary,
             "description": self.description,
@@ -275,7 +299,7 @@ class AppStreamPackage:
             #"architectures": self.architectures,
             "categories": self.categories,
             "bundle_id": self.flatpak_bundle,
-            "match_type": _pretty_label(self.match.name),
+            "match_type": self._pretty_label(self.match.name),
             "match_type_raw": self.match.name,
             "repo": self.repo_name,
             "screenshots": self.screenshots,
@@ -478,26 +502,43 @@ class AppstreamSearcher:
         packages = self.remotes[repo_name]
         found = None
 
+        def norm(s: str) -> str:
+            s = (s or "").strip()
+            if s.endswith(".desktop"):
+                s = s[:-8]
+            if s.startswith("app/") or s.startswith("runtime/"):
+                parts = s.split("/")
+                if len(parts) >= 2:
+                    s = parts[1]
+            return s.lower()
+
+        key = norm(keyword)
+
         for package in packages:
-            # Try matching exact ID first
-            if keyword == package.id:
+            # 1) exact Flatpak app-id match (best)
+            if key and norm(getattr(package, "flatpak_app_id", "")) == key:
                 found = package
                 break
-            # Next try matching exact name
-            elif keyword.lower() == package.name.lower():
+
+            # 2) exact component id match (desktop-id etc)
+            if key and norm(package.id) == key:
                 found = package
                 break
-            # Try matching case insensitive ID next
-            elif keyword.lower() == package.id.lower():
+
+            # 3) exact name match
+            if key and package.name and package.name.lower() == key:
                 found = package
                 break
-            # General keyword search
-            elif keyword.lower() in str(package).lower():
+
+            # 4) fallback fuzzy
+            if key and key in str(package).lower():
                 found = package
                 break
+
         if found:
             search_results.append(found)
         return search_results
+
 
 
     def search_flatpak(self, keyword: str, repo_name=None) -> list[AppStreamPackage]:
@@ -886,16 +927,31 @@ class AppstreamSearcher:
             logger.error(f"Error refreshing category {category}: {str(e)}")
 
     def _process_system_category(self, searcher, category, system=False):
-        """Process system-related categories."""
-        if "installed" in category:
+        if category == "installed":
             installed_apps = get_installation(system).list_installed_refs()
             for app in installed_apps:
-                search_result = searcher.search_flatpak(app.get_name(), app.get_origin())
+                ref_str = app.format_ref()
+                origin = app.get_origin()
+
+                search_result = searcher.search_flatpak(ref_str, origin)
+                if not search_result:
+                    search_result = searcher.search_flatpak(app.get_name(), origin)
+
+                for pkg in search_result:
+                    # Pin to the real installed app-id
+                    pkg.installed_app_id = app.get_name()
+                    pkg.installed_ref = ref_str
+                    pkg.installed_origin = origin
+
                 self.installed_results.extend(search_result)
-        elif "updates" in category and check_internet():
-            updates = get_installation(system).list_installed_refs_for_update()
+
+        elif category == "updates" and check_internet():
+            updates = get_installation(system).list_installed_refs_for_update(None)
             for app in updates:
-                search_result = searcher.search_flatpak(app.get_name(), app.get_origin())
+                ref_str = app.format_ref()
+                search_result = searcher.search_flatpak(ref_str, app.get_origin())
+                if not search_result:
+                    search_result = searcher.search_flatpak(app.get_name(), app.get_origin())
                 self.updates_results.extend(search_result)
 
     def _get_current_results(self):
@@ -986,14 +1042,14 @@ def _run_transaction_with_progress(transaction: Flatpak.Transaction, progress_cb
 
     transaction.run()
 
-def install_flatpak(app: AppStreamPackage, repo_name=None, system=False, progress_cb=None) -> tuple[bool, str]:
+
+def install_flatpak(app, repo_name=None, system=False, progress_cb=None) -> tuple[bool, str]:
     if not repo_name:
         repo_name = "flathub"
 
     installation = get_installation(system)
-
     cancellable = Gio.Cancellable()
-    transaction = Flatpak.Transaction.new_for_installation(installation, cancellable)  # API expects cancellable :contentReference[oaicite:2]{index=2}
+    transaction = Flatpak.Transaction.new_for_installation(installation, cancellable)
 
     def emit_progress(pct: int, status: str = ""):
         if progress_cb:
@@ -1003,14 +1059,12 @@ def install_flatpak(app: AppStreamPackage, repo_name=None, system=False, progres
                 pass
 
     def on_new_operation(tx, operation, progress):
-        # new-operation gives us a TransactionProgress object :contentReference[oaicite:3]{index=3}
         if not progress:
             return
 
         def on_changed(prog):
-            # TransactionProgress exposes get_progress(), and emits "changed" :contentReference[oaicite:4]{index=4}
             try:
-                pct = prog.get_progress()  # typically 0..100
+                pct = prog.get_progress()
             except Exception:
                 pct = 0
             try:
@@ -1019,37 +1073,80 @@ def install_flatpak(app: AppStreamPackage, repo_name=None, system=False, progres
                 status = ""
             emit_progress(pct, status)
 
-        progress.connect("changed", on_changed)  # :contentReference[oaicite:5]{index=5}
-        on_changed(progress)  # initial update
+        progress.connect("changed", on_changed)
+        on_changed(progress)
 
-    transaction.connect("new-operation", on_new_operation)  # :contentReference[oaicite:6]{index=6}
+    transaction.connect("new-operation", on_new_operation)
 
-    available_apps = installation.list_remote_refs_sync(repo_name)
-    match_found = False
-    for available_app in available_apps:
-        if available_app.get_name() in app.id:
-            match_found = True
-            transaction.add_install(repo_name, available_app.format_ref(), None)
+    # Determine preferred arch (Flatpak arch names are usually x86_64/aarch64)
+    # platform.machine() returns x86_64/aarch64 on most systems.
+    wanted_arch = platform.machine()
 
-    if not match_found:
-        return False, f"No available package named {app.id} found in any repositories."
+    wanted_name = getattr(app, "id", None) or getattr(app, "get_id", lambda: None)()  # be defensive
+    if not wanted_name:
+        return False, "App has no id."
+
+    # If your AppStreamPackage has a preferred branch/ref in details, use it:
+    details = getattr(app, "get_details", lambda: {})() or {}
+    preferred_branch = details.get("branch")  # may be None
+    # Many appstream entries don’t include branch; fall back to stable-first preference.
+    branch_preference = [preferred_branch] if preferred_branch else []
+    branch_preference += ["stable", "master", "beta", "test", "edge", "insiders"]
+
+    try:
+        remote_refs = installation.list_remote_refs_sync(repo_name)
+    except GLib.Error as e:
+        return False, f"Failed to list refs for {repo_name}: {e}"
+
+    candidates = []
+    for r in remote_refs:
+        try:
+            # Only apps
+            if r.get_kind() != Flatpak.RefKind.APP:
+                continue
+            if r.get_name() != wanted_name:
+                continue
+            if r.get_arch() != wanted_arch:
+                continue
+            candidates.append(r)
+        except Exception:
+            continue
+
+    if not candidates:
+        return False, f"No available APP ref named {wanted_name} (arch {wanted_arch}) in {repo_name}."
+
+    # Pick best branch
+    def branch_rank(ref):
+        b = ref.get_branch()
+        try:
+            return branch_preference.index(b)
+        except ValueError:
+            return 999
+
+    best = sorted(candidates, key=branch_rank)[0]
 
     emit_progress(0, "Preparing…")
 
     try:
-        transaction.run(cancellable)  # API expects cancellable :contentReference[oaicite:7]{index=7}
+        transaction.add_install(repo_name, best.format_ref(), None)
+        transaction.run(cancellable)
     except GLib.Error as e:
         return False, f"Installation failed: {e}"
 
     emit_progress(100, "Finishing…")
-    return True, f"Successfully installed {app.id}"
+    return True, f"Successfully installed {best.format_ref()}"
 
 
 
 def install_flatpakref(ref_file, system=False, progress_cb=None):
     installation = get_installation(system)
 
-    # ... your validation and file read remains the same ...
+    # Read the flatpakref file
+    try:
+        with open(ref_file, 'rb') as f:
+            repo_data = f.read()
+    except IOError as e:
+        return False, f"Failed to read flatpakref file: {str(e)}"
 
     repo_bytes = GLib.Bytes.new(repo_data)
 
@@ -1114,9 +1211,10 @@ def remove_flatpak(app: AppStreamPackage, system=False) -> tuple[bool, str]:
     # Create a new transaction for removal
     transaction = Flatpak.Transaction.new_for_installation(installation)
     match_found = None
+    target = getattr(app, "flatpak_app_id", None) or app.id
     for installed_ref in installed:
-        if installed_ref.get_name() in app.id:
-            match_found = 1
+        if installed_ref.get_name() == target:
+            match_found = True
             # Add the install operation
             transaction.add_uninstall(installed_ref.format_ref())
 
@@ -1146,9 +1244,10 @@ def update_flatpak(app: AppStreamPackage, system=False) -> tuple[bool, str]:
     # Create a new transaction for removal
     transaction = Flatpak.Transaction.new_for_installation(installation)
     match_found = None
+    target = getattr(app, "flatpak_app_id", None) or app.id
     for update in updates:
-        if update.get_name() in app.id:
-            match_found = 1
+        if update.get_name() == target:
+            match_found = True
             # Add the install operation
             transaction.add_update(update.format_ref())
 
@@ -2739,7 +2838,7 @@ def handle_list_installed(args, searcher):
 def handle_check_updates(args, searcher):
     updates = searcher.check_updates(args.system)
     print(f"\nAvailable Updates ({len(updates)}):")
-    for repo_name, app_id, repo_type in updates:
+    for app_id, repo_name, repo_type in updates:
         print(f"{app_id} (Repository: {repo_name}, Installation: {repo_type})")
 
 def handle_list_all(args, searcher):

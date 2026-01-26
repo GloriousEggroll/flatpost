@@ -864,6 +864,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.metadata_loaded = True
             self.metadata_loading = False
             self.metadata_error = None
+            self._rebuild_meta_indexes()
 
         # Create main layout
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -885,6 +886,100 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # 3) Refresh in background (non-blocking)
         self.start_metadata_refresh(show_error_dialog=False, force=False)
+
+    def _details_id(self, obj):
+        try:
+            return (obj.get_details() or {}).get("id")
+        except Exception:
+            return None
+
+    def _pick_exact_match(self, result, app_id):
+        """
+        searcher.search_flatpak(...) might return:
+        - a single component
+        - a list/iterable of components
+        - something else truthy
+        We only accept an exact id match.
+        """
+        if result is None:
+            return None
+
+        # If it's already a component-like object
+        rid = self._details_id(result)
+        if rid == app_id:
+            return result
+
+        # If it's iterable of results
+        if isinstance(result, (list, tuple)):
+            for r in result:
+                if self._details_id(r) == app_id:
+                    return r
+
+        return None
+
+    def _component_key(self, c):
+        """
+        Stable key to match an installed component to its metadata component.
+        Prefer the exact identity: (id, branch, origin/repo, arch).
+        """
+        d = (c.get_details() or {})
+        app_id = d.get("id")
+
+        # branch/origin naming varies a bit depending on source
+        branch = d.get("branch") or d.get("flatpak_branch")
+        origin = d.get("origin") or d.get("repo") or d.get("remote")
+        arch = d.get("arch")
+
+        return (app_id, branch, origin, arch)
+
+    def _rebuild_meta_indexes(self):
+        """
+        Build lookup tables from metadata components (self.all_apps).
+        Call this after you set self.all_apps (cache load or metadata refresh).
+        """
+        self.meta_by_key = {}
+        self.meta_by_id_only = {}
+
+        for c in (self.all_apps or []):
+            k = self._component_key(c)
+            if k and k[0]:
+                self.meta_by_key[k] = c
+
+            d = (c.get_details() or {})
+            if d.get("id"):
+                self.meta_by_id_only.setdefault(d["id"], []).append(c)
+
+    def _best_metadata_for_installed(self, installed_component):
+        """
+        Match installed item to metadata by key first; fallback by id (then branch).
+        Returns a *display component* (metadata if possible, else installed).
+        """
+        # Ensure indexes exist
+        if not hasattr(self, "meta_by_key") or not hasattr(self, "meta_by_id_only"):
+            self._rebuild_meta_indexes()
+
+        k = self._component_key(installed_component)
+        m = self.meta_by_key.get(k)
+        if m:
+            return m
+
+        d = installed_component.get_details() or {}
+        app_id = d.get("id")
+        if not app_id:
+            return installed_component
+
+        candidates = self.meta_by_id_only.get(app_id, [])
+        if not candidates:
+            return installed_component
+
+        # try branch match
+        br = d.get("branch") or d.get("flatpak_branch")
+        if br:
+            for c in candidates:
+                if (c.get_details() or {}).get("branch") == br:
+                    return c
+
+        return candidates[0]
 
     def _d(self, obj, key, default=""):
         """Read a field from either fp_turbo app objects or cached proxies."""
@@ -1149,6 +1244,9 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.installed_results = installed_results
                     self.updates_results = updates_results
                     self.all_apps = all_apps
+                    self._rebuild_meta_indexes()
+                    # keep installed/updates authoritative from refresh_local
+                    self.refresh_local()
 
                     # Save cache (best effort)
                     try:
@@ -1698,12 +1796,61 @@ class MainWindow(Gtk.ApplicationWindow):
         if not refresh_thread.is_alive() and dialog.is_active():
             dialog.destroy()
 
+    def dump_installed(self, limit=200):
+        logger.info("installed_results count=%d", len(self.installed_results or []))
+        for i, app in enumerate((self.installed_results or [])[:limit]):
+            try:
+                d = app.get_details() or {}
+            except Exception as e:
+                logger.warning("[%d] (no details) type=%s err=%s", i, type(app), e)
+                continue
+
+            logger.info("[%03d] id=%s  name=%s", i, d.get("id"), d.get("name"))
+
+        if self.installed_results and len(self.installed_results) > limit:
+            logger.info("... (%d more)", len(self.installed_results) - limit)
+
+    def dump_components(self, label, comps, limit=200):
+        comps = comps or []
+        logger.info("%s count=%d", label, len(comps))
+
+        for i, app in enumerate(comps[:limit]):
+            try:
+                d = app.get_details() or {}
+            except Exception as e:
+                logger.warning("[%03d] type=%s (no details) err=%s", i, type(app), e)
+                continue
+
+            app_id = d.get("id")
+            name = d.get("name")
+            branch = d.get("branch") or d.get("flatpak_branch")
+            origin = d.get("origin") or d.get("remote") or d.get("repo")
+            arch = d.get("arch")
+            repo = d.get("repo")
+            kind = d.get("kind")
+
+            logger.info(
+                "[%03d] id=%s name=%r branch=%s origin=%s arch=%s repo=%s kind=%s obj=%s",
+                i, app_id, name, branch, origin, arch, repo, kind, type(app).__name__
+            )
+
+        if len(comps) > limit:
+            logger.info("... (%d more)", len(comps) - limit)
+
     def refresh_local(self):
         try:
             searcher = fp_turbo.get_reposearcher(self.system_mode)
             installed_results, updates_results = searcher.refresh_local(self.system_mode)
-            self.installed_results = installed_results
-            self.updates_results = updates_results
+            self.installed_results = installed_results or []
+            self.updates_results = updates_results or []
+            self.dump_installed()
+            self.dump_components("INSTALLED", self.installed_results)
+            self.dump_components("UPDATES", self.updates_results)
+            self.installed_ids = {self._component_id(x) for x in self.installed_results}
+            self.installed_ids.discard(None)
+
+            self.update_ids = {self._component_id(x) for x in self.updates_results}
+            self.update_ids.discard(None)
         except Exception as e:
             message_type = Gtk.MessageType.ERROR
             dialog = Gtk.MessageDialog(
@@ -2404,24 +2551,19 @@ class MainWindow(Gtk.ApplicationWindow):
         return priorities.get(kind, 3)
 
     def show_category_apps(self, category, preserve_scroll=False):
-        if self.current_group == "system" and category == "installed":
+        if self.current_group == "system" and category in ("installed", "updates"):
             # Installed/Updates are local; don't block on metadata.
-            if category in ("installed", "updates"):
-                apps = []
-                if not preserve_scroll:
-                    vadjustment = self.category_scrolled_window.get_vadjustment()
-                    vadjustment.set_value(vadjustment.get_lower())
+            apps = list(self.installed_results or []) if category == "installed" else list(self.updates_results or [])
 
-                if category == "installed":
-                    apps.extend(list(self.installed_results or []))
-                else:
-                    apps.extend(list(self.updates_results or []))
+            if not preserve_scroll:
+                vadj = self.category_scrolled_window.get_vadjustment()
+                vadj.set_value(vadj.get_lower())
 
-                if apps:
-                    apps.sort(key=lambda app: self.get_app_priority(app.get_details().get('kind')))
-                self.all_components = list(apps)
-                self.update_component_view(keep_page=preserve_scroll)
-                return
+            if apps:
+                apps.sort(key=lambda app: self.get_app_priority(app.get_details().get('kind')))
+            self.all_components = apps
+            self.update_component_view(keep_page=preserve_scroll)
+            return
 
             # Everything else needs metadata
             if self.metadata_loading or not self.metadata_loaded:
@@ -2704,41 +2846,66 @@ class MainWindow(Gtk.ApplicationWindow):
             self.right_container.remove(child)
 
     def _group_apps_by_id(self, apps):
-        """Group applications by their IDs and collect repositories."""
+        """Group applications by their IDs and collect repositories.
+        For Installed/Updates, use metadata for display but keep installed component for actions.
+        """
         apps_dict = {}
-        for app in apps:
-            details = app.get_details()
-            app_id = details['id']
+
+        enrich = (self.current_group == "system" and self.current_page in ("installed", "updates"))
+
+        for action_app in apps:
+            action_details = action_app.get_details() or {}
+            app_id = action_details.get("id")
+            if not app_id:
+                continue
+
+            display_app = action_app
+            if enrich:
+                display_app = self._best_metadata_for_installed(action_app)
+
+            display_details = display_app.get_details() or {}
 
             if app_id not in apps_dict:
-                apps_dict[app_id] = {'app': app, 'repos': set()}
+                apps_dict[app_id] = {
+                    "display_app": display_app,
+                    "action_app": action_app,
+                    "repos": set()
+                }
 
-            apps_dict[app_id]['repos'].add(details.get('repo', 'unknown'))
+            apps_dict[app_id]["repos"].add(display_details.get("repo", action_details.get("repo", "unknown")))
+
         return apps_dict
+
 
     def _create_and_add_app_row(self, app_data):
         """Create and add a row for a single application."""
-        app = app_data['app']
-        details = app.get_details()
+        display_app = app_data.get("display_app") or app_data.get("app")
+        action_app = app_data.get("action_app") or display_app
 
-        status = self._get_app_status(app)
+        details = display_app.get_details() or {}
+
+        status = self._get_app_status(action_app)
         container = self._create_app_container()
         content_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+
         self._setup_icon(content_box, details)
         self._setup_text_layout(content_box, details, app_data['repos'])
+
         row_state = {}
-        self._setup_buttons(content_box, status, app, row_state=row_state)
-        app_id = details.get("id")
+        self._setup_buttons(content_box, status, action_app, row_state=row_state)
+
+        app_id = details.get("id") or (action_app.get_details() or {}).get("id")
         if app_id:
-            row_state["app"] = app
+            row_state["app"] = action_app
             row_state["content_box"] = content_box
-            row_state["row_container"] = container  # outer row container, useful for removing row
+            row_state["row_container"] = container
             self.app_rows[app_id] = row_state
+
         content_box.get_style_context().add_class('app-list-item')
 
         event_box = Gtk.EventBox()
         event_box.connect("button-release-event",
-                        lambda w, e: self.click_event(app, content_box))
+                        lambda w, e: self.click_event(display_app, content_box))
         event_box.connect("enter-notify-event", lambda w, e: self.enter_hover_event(content_box)); # These connect signals handles hover
         event_box.connect("leave-notify-event", lambda w, e: self.leave_hover_event(content_box));
 
@@ -2796,14 +2963,18 @@ class MainWindow(Gtk.ApplicationWindow):
         # Make sure GTK relayout happens
         row["content_box"].show_all()
 
+    def _component_id(self, obj):
+        try:
+            return (obj.get_details() or {}).get("id")
+        except Exception:
+            return getattr(obj, "id", None)
+
     def _get_app_status(self, app):
-        """Determine installation and update status of an application."""
-        details = app.get_details()
-        app_id = details.get('id')
+        app_id = self._component_id(app)
         return {
-            'is_installed': bool(app_id) and any(pkg.id == app_id for pkg in self.installed_results),
-            'is_updatable': bool(app_id) and any(pkg.id == app_id for pkg in self.updates_results),
-            'has_donation_url': bool(app.get_details().get('urls', {}).get('donation'))
+            "is_installed": bool(app_id) and app_id in getattr(self, "installed_ids", set()),
+            "is_updatable": bool(app_id) and app_id in getattr(self, "update_ids", set()),
+            "has_donation_url": bool((app.get_details() or {}).get("urls", {}).get("donation")),
         }
 
     def _create_app_container(self):
@@ -3148,22 +3319,37 @@ class MainWindow(Gtk.ApplicationWindow):
         repos = fp_turbo.repolist(self.system_mode)
         app_id = app.get_details()['id']
 
-        available = [
-            repo for repo in repos
-            if (not repo.get_disabled()) and searcher.search_flatpak(app_id, repo.get_name())
-        ]
+        # Map repo_name -> exact component found in that repo
+        self._install_candidates = {}
 
-        if len(available) >= 2:
-            for repo in available:
-                self.repo_combo.append_text(repo.get_name())
-            self.repo_combo.set_active(0)
+        for repo in repos:
+            if repo.get_disabled():
+                continue
+            res = searcher.search_flatpak(app_id, repo.get_name())
+            exact = self._pick_exact_match(res, app_id)
+            if exact:
+                self._install_candidates[repo.get_name()] = exact
+
+        available_names = list(self._install_candidates.keys())
+
+        if len(available_names) >= 2:
+            for name in available_names:
+                self.repo_combo.append_text(name)
+
+            # Prefer the repo that metadata says this entry came from (if present)
+            preferred = app.get_details().get("repo")
+            if preferred in available_names:
+                self.repo_combo.set_active(available_names.index(preferred))
+            else:
+                self.repo_combo.set_active(0)
+
             content_area.pack_start(self.repo_combo, False, False, 0)
-        elif len(available) == 1:
-            # Keep a "selected repo" without showing the widget
-            self.repo_combo.append_text(available[0].get_name())
+
+        elif len(available_names) == 1:
+            self.repo_combo.append_text(available_names[0])
             self.repo_combo.set_active(0)
+
         else:
-            # No repos found: you can choose to show a label instead
             lbl = Gtk.Label(label="No enabled repositories contain this app.")
             lbl.get_style_context().add_class("dim-label")
             content_area.pack_start(lbl, False, False, 0)
@@ -3212,16 +3398,17 @@ class MainWindow(Gtk.ApplicationWindow):
             GLib.idle_add(self.show_install_progress_dialog)
 
             if button:
-                success, message = install_flatpak_compat(app, selected_repo, self.system_mode, progress_cb=progress_cb)
-                aid = app.get_details().get("id")
+                # Use the exact per-repo component if we have it
+                candidate = getattr(self, "_install_candidates", {}).get(selected_repo) or app
+                success, message = install_flatpak_compat(candidate, selected_repo, self.system_mode, progress_cb=progress_cb)
+                aid = candidate.get_details().get("id")
             else:
                 success, message = install_flatpakref_compat(app, self.system_mode, progress_cb=progress_cb)
                 aid = str(app)
 
             GLib.idle_add(lambda: self.on_task_complete(success, message, aid))
 
-        thread = threading.Thread(target=installation_thread, daemon=True)
-        thread.start()
+        threading.Thread(target=installation_thread, daemon=True).start()
 
 
     def on_task_complete(self, success, message, app_id=None):
