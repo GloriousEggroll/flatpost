@@ -250,8 +250,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.system_mode = system_mode
         self.system_only_mode = system_only_mode
         self.system_switch = Gtk.Switch()
-        self.search_entry = Gtk.SearchEntry()
-        self._search_changed_handler_id = self.search_entry.connect("changed", self.on_search_changed)
         # Create system mode label
         self.system_label = Gtk.Label(label="System Mode")
         if self.system_mode:
@@ -1080,21 +1078,13 @@ class MainWindow(Gtk.ApplicationWindow):
         items = self.sort_components(items, self.current_sort)
         self.filtered_components = items
 
-        # --- PAGINATION ---
+        # --- NO PAGINATION: render everything ---
         total = len(items)
-        max_page = max(1, math.ceil(total / self.page_size))
 
-        if not keep_page:
-            self.list_page = 1
-        else:
-            # If filtering reduces total pages, clamp the current page
-            self.list_page = min(max(1, self.list_page), max_page)
+        # optional: keep these sane if other code expects them
+        self.list_page = 1
 
-        start = (self.list_page - 1) * self.page_size
-        end = start + self.page_size
-        page_items = items[start:end]
-
-        self.render_component_list(page_items, total_count=total)
+        self.render_component_list(items, total_count=total)
 
 
 
@@ -1102,7 +1092,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if sort_mode == "NAME":
             return sorted(items, key=lambda c: (self._d(c, "name", "") or "").lower())
         if sort_mode == "KIND":
-            return sorted(items, key=lambda c: (self._d(c, "kind", "") or ""))
+            return sorted(items, key=lambda c: self._kind_id(self._get_component_kind(c)))
         return items
 
     def render_component_list(self, page_items, total_count):
@@ -1372,20 +1362,21 @@ class MainWindow(Gtk.ApplicationWindow):
         tool_box.set_margin_end(0)
 
         # Create search entry with icon
-        searchentry = Gtk.SearchEntry()
-        searchentry.set_placeholder_text("Search applications...")
-        searchentry.set_icon_from_gicon(Gtk.EntryIconPosition.PRIMARY,
-                                    Gio.Icon.new_for_string('system-search-symbolic'))
+        self.search_entry = Gtk.SearchEntry()
+        self.search_entry.set_placeholder_text("Search applications...")
+        self.search_entry.set_icon_from_gicon(
+            Gtk.EntryIconPosition.PRIMARY,
+            Gio.Icon.new_for_string('system-search-symbolic')
+        )
 
         # Connect search entry signals
-        searchentry.connect("search-changed", self.on_search_changed)
-        searchentry.connect("activate", self.on_search_activate)
+        self._search_changed_handler_id = self.search_entry.connect("search-changed", self.on_search_changed)
+        self.search_entry.connect("activate", self.on_search_activate)
 
         # Connect search entry to search bar
-        self.searchbar.connect_entry(searchentry)
-        self.searchbar.add(searchentry)
+        self.searchbar.connect_entry(self.search_entry)
+        self.searchbar.add(self.search_entry)
         self.searchbar.set_search_mode(True)
-
         self.top_bar.pack_start(self.searchbar, False, False, 0)
 
         self.component_type_combo_label = Gtk.Label(label="Search Type:")
@@ -1796,56 +1787,12 @@ class MainWindow(Gtk.ApplicationWindow):
         if not refresh_thread.is_alive() and dialog.is_active():
             dialog.destroy()
 
-    def dump_installed(self, limit=200):
-        logger.info("installed_results count=%d", len(self.installed_results or []))
-        for i, app in enumerate((self.installed_results or [])[:limit]):
-            try:
-                d = app.get_details() or {}
-            except Exception as e:
-                logger.warning("[%d] (no details) type=%s err=%s", i, type(app), e)
-                continue
-
-            logger.info("[%03d] id=%s  name=%s", i, d.get("id"), d.get("name"))
-
-        if self.installed_results and len(self.installed_results) > limit:
-            logger.info("... (%d more)", len(self.installed_results) - limit)
-
-    def dump_components(self, label, comps, limit=200):
-        comps = comps or []
-        logger.info("%s count=%d", label, len(comps))
-
-        for i, app in enumerate(comps[:limit]):
-            try:
-                d = app.get_details() or {}
-            except Exception as e:
-                logger.warning("[%03d] type=%s (no details) err=%s", i, type(app), e)
-                continue
-
-            app_id = d.get("id")
-            name = d.get("name")
-            branch = d.get("branch") or d.get("flatpak_branch")
-            origin = d.get("origin") or d.get("remote") or d.get("repo")
-            arch = d.get("arch")
-            repo = d.get("repo")
-            kind = d.get("kind")
-
-            logger.info(
-                "[%03d] id=%s name=%r branch=%s origin=%s arch=%s repo=%s kind=%s obj=%s",
-                i, app_id, name, branch, origin, arch, repo, kind, type(app).__name__
-            )
-
-        if len(comps) > limit:
-            logger.info("... (%d more)", len(comps) - limit)
-
     def refresh_local(self):
         try:
             searcher = fp_turbo.get_reposearcher(self.system_mode)
             installed_results, updates_results = searcher.refresh_local(self.system_mode)
             self.installed_results = installed_results or []
             self.updates_results = updates_results or []
-            self.dump_installed()
-            self.dump_components("INSTALLED", self.installed_results)
-            self.dump_components("UPDATES", self.updates_results)
             self.installed_ids = {self._component_id(x) for x in self.installed_results}
             self.installed_ids.discard(None)
 
@@ -2551,27 +2498,16 @@ class MainWindow(Gtk.ApplicationWindow):
         return priorities.get(kind, 3)
 
     def show_category_apps(self, category, preserve_scroll=False):
+        # 1) System pages are local-only
         if self.current_group == "system" and category in ("installed", "updates"):
-            # Installed/Updates are local; don't block on metadata.
             apps = list(self.installed_results or []) if category == "installed" else list(self.updates_results or [])
-
-            if not preserve_scroll:
-                vadj = self.category_scrolled_window.get_vadjustment()
-                vadj.set_value(vadj.get_lower())
-
-            if apps:
-                apps.sort(key=lambda app: self.get_app_priority(app.get_details().get('kind')))
+            ...
             self.all_components = apps
             self.update_component_view(keep_page=preserve_scroll)
             return
 
-            # Everything else needs metadata
-            if self.metadata_loading or not self.metadata_loaded:
-                self._show_loading_view("Fetching Metadata… Please wait")
-                return
-
-        collections_keys = self._collections_keys()  # <-- add this
-
+        # 2) Collections need metadata (and show loading/error views)
+        collections_keys = self._collections_keys()
         if self.current_group == "collections" and category in collections_keys:
             if getattr(self, "metadata_loading", False):
                 self._show_loading_view("Fetching Metadata… Please wait")
@@ -2585,6 +2521,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.start_metadata_refresh(show_error_dialog=False, force=True)
                 return
 
+        # 3) Everything else also needs metadata
         if self.metadata_loading or not self.metadata_loaded:
             self._show_loading_view("Fetching Metadata… Please wait")
             return
@@ -3013,7 +2950,8 @@ class MainWindow(Gtk.ApplicationWindow):
         name = details.get('name') or details.get('id') or "Unknown"
         developer = details.get('developer') or ""
         summary = details.get('summary') or ""
-        kind = self._kind_id(details.get("kind"))
+        kind_raw = details.get("kind")
+        kind = self._kind_id(kind_raw)   # already returns a stable string
 
         # Title
         title_label = Gtk.Label(label=name)
@@ -3050,7 +2988,7 @@ class MainWindow(Gtk.ApplicationWindow):
         kind_box.get_style_context().add_class("dim-label")
         kind_box.get_style_context().add_class("app-list-misc")
 
-        kind_label = Gtk.Label(label=f"Type: {details['kind']}")
+        #kind_label = Gtk.Label(label=f"Type: {kind}")
         # kind_box.pack_end(kind_label, False, False, 0)
         # right_box.pack_start(kind_box, False, False, 0)
 
