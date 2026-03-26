@@ -1090,6 +1090,66 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def sort_components(self, items, sort_mode):
         if sort_mode == "NAME":
+            # When searching, rank by relevance so exact/prefix matches appear
+            # before arbitrary alphabetically-first entries.
+            search_text = (self.current_search_text or "").strip().lower()
+            if search_text:
+                def get_sort_key(c):
+                    name = (self._d(c, "name", "") or "").strip().lower()
+                    summary = (self._d(c, "summary", "") or "").strip().lower()
+                    desc = (self._d(c, "description", "") or "").strip().lower()
+                    appid = (self._d(c, "id", "") or "").strip().lower()
+
+                    # Lower tuple values are better.
+                    # Buckets:
+                    # 0 exact name match
+                    # 1 name startswith
+                    # 2 name contains (earlier index wins)
+                    # 3 exact app id match
+                    # 4 app id startswith
+                    # 5 app id contains
+                    # 6 summary contains
+                    # 7 description contains
+                    # 8 fallback: alphabetical
+                    best_bucket = 8
+                    best_index = 0
+
+                    if name:
+                        if name == search_text:
+                            best_bucket, best_index = 0, 0
+                        elif name.startswith(search_text):
+                            best_bucket, best_index = 1, 0
+                        else:
+                            idx = name.find(search_text)
+                            if idx != -1 and (best_bucket, idx) > (2, idx):
+                                best_bucket, best_index = 2, idx
+
+                    if appid:
+                        if appid == search_text and (3, 0) < (best_bucket, best_index):
+                            best_bucket, best_index = 3, 0
+                        elif appid.startswith(search_text) and (4, 0) < (best_bucket, best_index):
+                            best_bucket, best_index = 4, 0
+                        else:
+                            idx = appid.find(search_text)
+                            if idx != -1 and (5, idx) < (best_bucket, best_index):
+                                best_bucket, best_index = 5, idx
+
+                    if summary:
+                        idx = summary.find(search_text)
+                        if idx != -1 and (6, idx) < (best_bucket, best_index):
+                            best_bucket, best_index = 6, idx
+
+                    if desc:
+                        idx = desc.find(search_text)
+                        if idx != -1 and (7, idx) < (best_bucket, best_index):
+                            best_bucket, best_index = 7, idx
+
+                    # Tie-breaker: stable alphabetical order.
+                    return (best_bucket, best_index, name or appid or "")
+
+                return sorted(items, key=get_sort_key)
+
+            # No search text -> default alphabetical behavior.
             return sorted(items, key=lambda c: (self._d(c, "name", "") or "").lower())
         if sort_mode == "KIND":
             return sorted(items, key=lambda c: self._kind_id(self._get_component_kind(c)))
